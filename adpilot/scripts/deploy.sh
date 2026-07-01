@@ -25,9 +25,13 @@ npm ci || { echo -e "${RED}❌ Failed to install dependencies${NC}"; exit 1; }
 echo -e "${YELLOW}🔨 Building application...${NC}"
 npm run build || { echo -e "${RED}❌ Build failed${NC}"; exit 1; }
 
-# Step 4: Restart with PM2
+# Step 4: Restart with PM2 (or start if not yet running)
 echo -e "${YELLOW}♻️  Restarting with PM2...${NC}"
-pm2 restart adpilot --env production || { echo -e "${RED}❌ Failed to restart PM2${NC}"; exit 1; }
+if pm2 describe adpilot > /dev/null 2>&1; then
+    pm2 reload ecosystem.config.cjs --env production || { echo -e "${RED}❌ Failed to reload PM2${NC}"; exit 1; }
+else
+    pm2 start ecosystem.config.cjs --env production || { echo -e "${RED}❌ Failed to start PM2${NC}"; exit 1; }
+fi
 
 # Step 5: Save PM2 process list
 pm2 save
