@@ -63,6 +63,12 @@ app.use(
 
 app.use(express.urlencoded({ extended: false }));
 
+// Prevent search engine indexing for private app
+app.use((req, res, next) => {
+  res.header("X-Robots-Tag", "noindex, nofollow");
+  next();
+});
+
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
     hour: "numeric",
