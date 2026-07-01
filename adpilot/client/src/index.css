@@ -1,0 +1,672 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* LIGHT MODE */
+:root {
+  --button-outline: rgba(15, 23, 42, .10);
+  --badge-outline: rgba(15, 23, 42, .08);
+  --opaque-button-border-intensity: -8;
+  --elevate-1: rgba(15, 23, 42, .03);
+  --elevate-2: rgba(15, 23, 42, .08);
+  --background: 42 33% 98%;
+  --foreground: 220 24% 12%;
+  --border: 220 16% 88%;
+  --card: 0 0% 100%;
+  --card-foreground: 220 24% 12%;
+  --card-border: 220 18% 92%;
+  --sidebar: 40 42% 97%;
+  --sidebar-foreground: 220 24% 12%;
+  --sidebar-border: 220 16% 89%;
+  --sidebar-primary: 47 100% 47%;
+  --sidebar-primary-foreground: 0 0% 5%;
+  --sidebar-accent: 45 70% 94%;
+  --sidebar-accent-foreground: 220 24% 12%;
+  --sidebar-ring: 47 100% 47%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 220 24% 12%;
+  --popover-border: 220 16% 88%;
+  --primary: 45 100% 55%;
+  --primary-foreground: 0 0% 0%;
+  --secondary: 40 21% 95%;
+  --secondary-foreground: 220 24% 12%;
+  --muted: 42 18% 95%;
+  --muted-foreground: 218 12% 38%;
+  --accent: 45 73% 94%;
+  --accent-foreground: 220 24% 12%;
+  --destructive: 0 73% 55%;
+  --destructive-foreground: 0 0% 100%;
+  --input: 220 16% 82%;
+  --ring: 45 100% 55%;
+  --chart-1: 45 100% 55%;
+  --chart-2: 220 68% 45%;
+  --chart-3: 146 52% 42%;
+  --chart-4: 11 77% 56%;
+  --chart-5: 215 16% 42%;
+  --font-sans: "League Spartan", system-ui, sans-serif;
+  --font-serif: Georgia, serif;
+  --font-mono: "JetBrains Mono", monospace;
+  --radius: .6rem;
+  --shadow-2xs: 0 1px 2px 0 hsl(220 25% 10% / 0.04);
+  --shadow-xs: 0 2px 4px 0 hsl(220 25% 10% / 0.06), 0 1px 2px -1px hsl(220 25% 10% / 0.03);
+  --shadow-sm: 0 4px 10px -4px hsl(220 25% 10% / 0.08), 0 2px 4px -2px hsl(220 25% 10% / 0.05);
+  --shadow: 0 10px 24px -10px hsl(220 25% 10% / 0.10), 0 4px 10px -4px hsl(220 25% 10% / 0.06);
+  --shadow-md: 0 16px 34px -16px hsl(220 25% 10% / 0.14), 0 10px 18px -10px hsl(220 25% 10% / 0.08);
+  --shadow-lg: 0 22px 40px -20px hsl(220 25% 10% / 0.18), 0 14px 26px -14px hsl(220 25% 10% / 0.10);
+  --shadow-xl: 0 30px 50px -24px hsl(220 25% 10% / 0.22), 0 18px 30px -18px hsl(220 25% 10% / 0.12);
+  --shadow-2xl: 0 40px 68px -28px hsl(220 25% 10% / 0.25);
+  --tracking-normal: 0em;
+  --spacing: 0.25rem;
+  --text-xs: 0.8125rem;  /* 13px */
+  --text-sm: 0.875rem;   /* 14px */
+  --text-base: 1rem;     /* 16px */
+  --text-md: 1.125rem;   /* 18px */
+  --text-lg: 1.25rem;    /* 20px */
+  --text-xl: 1.375rem;   /* 22px */
+  --text-2xl: 1.625rem;  /* 26px */
+  --text-3xl: 2rem;      /* 32px */
+
+  /* Compatibility fallbacks */
+  --primary-border: hsl(45 100% 45%);
+  --sidebar-primary-border: hsl(45 100% 45%);
+  --secondary-border: hsl(40 21% 90%);
+  --muted-border: hsl(42 18% 90%);
+  --accent-border: hsl(45 73% 90%);
+}
+
+/* DARK MODE - Deep Navy Analytics Theme */
+.dark {
+  --button-outline: rgba(255, 255, 255, .10);
+  --badge-outline: rgba(255, 255, 255, .05);
+  --opaque-button-border-intensity: 9;
+  --elevate-1: rgba(255, 255, 255, .04);
+  --elevate-2: rgba(255, 255, 255, .09);
+  --background: 222 20% 11%;
+  --foreground: 40 15% 90%;
+  --border: 220 15% 18%;
+  --card: 222 18% 13%;
+  --card-foreground: 40 15% 90%;
+  --card-border: 220 15% 18%;
+  --sidebar: 222 20% 9%;
+  --sidebar-foreground: 40 15% 90%;
+  --sidebar-border: 220 15% 14%;
+  --sidebar-primary: 47 80% 55%;
+  --sidebar-primary-foreground: 0 0% 5%;
+  --sidebar-accent: 223 15% 16%;
+  --sidebar-accent-foreground: 40 15% 90%;
+  --sidebar-ring: 47 80% 55%;
+  --popover: 222 18% 12%;
+  --popover-foreground: 40 15% 90%;
+  --popover-border: 220 15% 18%;
+  --primary: 47 80% 55%;
+  --primary-foreground: 0 0% 5%;
+  --secondary: 223 15% 16%;
+  --secondary-foreground: 40 15% 90%;
+  --muted: 223 15% 15%;
+  --muted-foreground: 215 10% 65%;
+  --accent: 223 15% 16%;
+  --accent-foreground: 40 15% 90%;
+  --destructive: 0 72% 56%;
+  --destructive-foreground: 0 0% 100%;
+  --input: 220 16% 22%;
+  --ring: 47 80% 55%;
+  --chart-1: 47 80% 55%;
+  --chart-2: 215 60% 65%;
+  --chart-3: 146 45% 55%;
+  --chart-4: 11 60% 65%;
+  --chart-5: 215 10% 70%;
+  --shadow-2xs: 0 1px 2px 0 hsl(220 40% 2% / 0.25);
+  --shadow-xs: 0 2px 4px 0 hsl(220 40% 2% / 0.28), 0 1px 2px -1px hsl(220 40% 2% / 0.22);
+  --shadow-sm: 0 8px 16px -8px hsl(220 40% 2% / 0.34), 0 2px 4px -2px hsl(220 40% 2% / 0.25);
+  --shadow: 0 12px 24px -12px hsl(220 40% 2% / 0.42), 0 4px 10px -4px hsl(220 40% 2% / 0.28);
+  --shadow-md: 0 20px 36px -16px hsl(220 40% 2% / 0.48), 0 10px 18px -10px hsl(220 40% 2% / 0.34);
+  --shadow-lg: 0 28px 46px -20px hsl(220 40% 2% / 0.54), 0 14px 26px -14px hsl(220 40% 2% / 0.38);
+  --shadow-xl: 0 38px 60px -24px hsl(220 40% 2% / 0.60), 0 20px 34px -18px hsl(220 40% 2% / 0.42);
+  --shadow-2xl: 0 48px 80px -30px hsl(220 40% 2% / 0.66);
+
+  --sidebar-primary-border: hsl(var(--sidebar-primary));
+  --sidebar-primary-border: hsl(from hsl(var(--sidebar-primary)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
+  --sidebar-accent-border: hsl(var(--sidebar-accent));
+  --sidebar-accent-border: hsl(from hsl(var(--sidebar-accent)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
+  --primary-border: hsl(var(--primary));
+  --primary-border: hsl(from hsl(var(--primary)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
+  --secondary-border: hsl(var(--secondary));
+  --secondary-border: hsl(from hsl(var(--secondary)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
+  --muted-border: hsl(var(--muted));
+  --muted-border: hsl(from hsl(var(--muted)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
+  --accent-border: hsl(var(--accent));
+  --accent-border: hsl(from hsl(var(--accent)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
+  --destructive-border: hsl(var(--destructive));
+  --destructive-border: hsl(from hsl(var(--destructive)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    /* 16px base — WCAG minimum for body text */
+    font-size: 16px;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply font-sans antialiased bg-background text-foreground;
+    font-size: var(--text-base);
+    font-weight: 400;
+    line-height: 1.6;
+    letter-spacing: 0.01em;
+    background-image:
+      radial-gradient(circle at top left, hsl(var(--primary) / 0.08), transparent 35%),
+      linear-gradient(180deg, hsl(var(--background)), hsl(var(--muted) / 0.4));
+    min-height: 100vh;
+  }
+
+  /* ── Consistent heading hierarchy ──────────────────────── */
+  h1 {
+    font-size: var(--text-3xl);
+    @apply font-bold leading-[1.3] tracking-tight;
+  }
+
+  h2 {
+    font-size: var(--text-2xl);
+    @apply font-bold leading-[1.3] tracking-tight;
+  }
+
+  h3 {
+    font-size: var(--text-lg);
+    @apply font-semibold leading-[1.4] tracking-tight;
+  }
+
+  h4 {
+    font-size: var(--text-md);
+    @apply font-semibold leading-[1.4] tracking-tight;
+  }
+
+  p,
+  li,
+  label,
+  button,
+  td,
+  th {
+    font-feature-settings: "ss01" 1, "tnum" 1;
+  }
+
+  /* ── Better focus states — WCAG AA ─────────────────────── */
+  :focus-visible {
+    @apply outline-none ring-2 ring-primary ring-offset-2 ring-offset-background;
+  }
+
+  ::selection {
+    background: hsl(var(--primary) / 0.3);
+    color: hsl(var(--foreground));
+  }
+
+  /* ── Tabular numbers for all numeric displays ───────────── */
+  .tabular-nums {
+    font-variant-numeric: tabular-nums lining-nums;
+  }
+
+  /* ── Standardized type scale helpers ─────────────────────── */
+  .type-xs {
+    font-size: var(--text-xs);
+    line-height: 1.5;
+    letter-spacing: 0.02em;
+  }
+
+  .type-sm {
+    font-size: var(--text-base);
+    line-height: 1.6;
+    letter-spacing: 0.01em;
+  }
+
+  .type-base {
+    font-size: var(--text-base);
+    line-height: 1.6;
+    letter-spacing: 0;
+  }
+
+  .type-lg {
+    font-size: var(--text-md);
+    line-height: 1.5;
+    letter-spacing: -0.01em;
+  }
+
+  .type-xl {
+    font-size: var(--text-lg);
+    line-height: 1.4;
+    letter-spacing: -0.02em;
+  }
+
+  .type-2xl {
+    font-size: var(--text-xl);
+    line-height: 1.3;
+    letter-spacing: -0.02em;
+  }
+
+  .type-3xl {
+    font-size: var(--text-2xl);
+    line-height: 1.3;
+    letter-spacing: -0.030em;
+  }
+
+  .page-shell {
+    @apply p-5 md:p-8;
+    display: grid;
+    gap: 2.5rem;
+    width: 100%;
+  }
+
+  .page-zone {
+    display: grid;
+    gap: 1.5rem;
+  }
+
+  .page-subsection {
+    display: grid;
+    gap: 0.75rem;
+  }
+
+  /* ── Smooth page transitions ────────────────────────────── */
+  main>* {
+    animation: fadeIn 0.15s ease-out;
+  }
+
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+}
+
+@layer utilities {
+  input[type="search"]::-webkit-search-cancel-button {
+    @apply hidden;
+  }
+
+  [contenteditable][data-placeholder]:empty::before {
+    content: attr(data-placeholder);
+    color: hsl(var(--muted-foreground));
+    pointer-events: none;
+  }
+
+  .no-default-hover-elevate {}
+
+  .no-default-active-elevate {}
+
+  .toggle-elevate::before,
+  .toggle-elevate-2::before {
+    content: "";
+    pointer-events: none;
+    position: absolute;
+    inset: 0px;
+    border-radius: inherit;
+    z-index: -1;
+  }
+
+  .toggle-elevate.toggle-elevated::before {
+    background-color: var(--elevate-2);
+  }
+
+  .border.toggle-elevate::before {
+    inset: -1px;
+  }
+
+  .hover-elevate:not(.no-default-hover-elevate),
+  .active-elevate:not(.no-default-active-elevate),
+  .hover-elevate-2:not(.no-default-hover-elevate),
+  .active-elevate-2:not(.no-default-active-elevate) {
+    position: relative;
+    z-index: 0;
+  }
+
+  .hover-elevate:not(.no-default-hover-elevate)::after,
+  .active-elevate:not(.no-default-active-elevate)::after,
+  .hover-elevate-2:not(.no-default-hover-elevate)::after,
+  .active-elevate-2:not(.no-default-active-elevate)::after {
+    content: "";
+    pointer-events: none;
+    position: absolute;
+    inset: 0px;
+    border-radius: inherit;
+    z-index: 999;
+  }
+
+  .hover-elevate:hover:not(.no-default-hover-elevate)::after,
+  .active-elevate:active:not(.no-default-active-elevate)::after {
+    background-color: var(--elevate-1);
+  }
+
+  .hover-elevate-2:hover:not(.no-default-hover-elevate)::after,
+  .active-elevate-2:active:not(.no-default-active-elevate)::after {
+    background-color: var(--elevate-2);
+  }
+
+  .border.hover-elevate:not(.no-hover-interaction-elevate)::after,
+  .border.active-elevate:not(.no-active-interaction-elevate)::after,
+  .border.hover-elevate-2:not(.no-hover-interaction-elevate)::after,
+  .border.active-elevate-2:not(.no-active-interaction-elevate)::after,
+  .border.hover-elevate:not(.no-hover-interaction-elevate)::after {
+    inset: -1px;
+  }
+}
+
+/* ─── CHART CONTAINER FIXES ─────────────────────────────────── */
+/* Ensure charts never get cut off or compressed */
+[data-chart] {
+  min-height: 250px;
+  width: 100%;
+}
+
+.recharts-responsive-container {
+  min-height: 20px;
+}
+
+/* ─── CARD SYSTEM ────────────────────────────────────────────── */
+@layer utilities {
+
+  /* Clickable cards get a lift on hover */
+  .card-interactive {
+    @apply cursor-pointer transition-transform transition-shadow duration-200;
+  }
+
+  .card-interactive:hover {
+    @apply shadow-lg -translate-y-px;
+  }
+
+  .card-interactive:active {
+    @apply translate-y-0 shadow-sm;
+  }
+
+  /* Compact card variant — for data-dense views */
+  .card-compact .shadcn-card>*:first-child {
+    @apply p-4;
+  }
+
+  .card-compact .shadcn-card [class*="CardContent"] {
+    @apply px-4 pb-4 pt-0;
+  }
+
+  /* Page container — consistent content padding */
+  .page-container {
+    @apply px-4 py-5 md:px-8 md:py-8 max-w-screen-2xl mx-auto;
+  }
+
+  /* Section spacing — consistent vertical rhythm between page sections */
+  .section-gap {
+    @apply space-y-5 md:space-y-7;
+  }
+}
+
+/* ─── EMPTY STATE ────────────────────────────────────────────── */
+@layer components {
+  .empty-state {
+    @apply flex flex-col items-center justify-center py-16 px-6 text-center;
+  }
+
+  .empty-state-icon {
+    @apply w-12 h-12 text-muted-foreground/40 mb-4;
+  }
+
+  .empty-state-title {
+    @apply text-base font-medium text-foreground mb-1;
+  }
+
+  .empty-state-description {
+    @apply text-base text-muted-foreground max-w-sm;
+  }
+}
+
+/* ─── SKELETON / LOADING STATES ──────────────────────────────── */
+@layer utilities {
+  .skeleton-card {
+    @apply animate-pulse rounded-lg bg-muted h-32;
+  }
+
+  .skeleton-row {
+    @apply animate-pulse rounded bg-muted h-10 w-full;
+  }
+
+  .skeleton-chart {
+    @apply animate-pulse rounded-lg bg-muted min-h-[250px] w-full;
+  }
+}
+
+/* ─── BADGE STATUS COLORS (standardized) ─────────────────────── */
+@layer utilities {
+  .badge-success {
+    @apply bg-emerald-500/10 text-emerald-600 border-emerald-500/20;
+  }
+
+  .badge-warning {
+    @apply bg-primary text-black border-primary border transition-all duration-200 cursor-pointer shadow-sm shadow-primary/10;
+  }
+
+  .badge-warning:hover {
+    @apply bg-muted text-black border-border/70 shadow-md -translate-y-0.5;
+  }
+
+  .badge-error {
+    @apply bg-red-500/10 text-red-600 border-red-500/20;
+  }
+
+  .badge-info {
+    @apply bg-blue-500/10 text-blue-600 border-blue-500/20;
+  }
+}
+
+.dark .badge-success {
+  @apply text-emerald-400;
+}
+
+.dark .badge-warning {
+  @apply bg-primary text-black border-primary;
+}
+
+.dark .badge-warning:hover {
+  @apply bg-muted text-black border-border/40 -translate-y-0.5 shadow-lg;
+}
+
+.dark .badge-error {
+  @apply text-red-400;
+}
+
+.dark .badge-info {
+  @apply text-blue-400;
+}
+
+/* ─── SCROLL BEHAVIOR ────────────────────────────────────────── */
+/* Prevent page-level scroll leaking from dialogs/modals */
+body[data-scroll-locked] {
+  overflow: hidden !important;
+}
+
+/* Smooth internal scrolling for dialog/table containers */
+.overflow-y-auto {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--muted)) transparent;
+}
+
+.overflow-y-auto::-webkit-scrollbar {
+  width: 6px;
+}
+
+.overflow-y-auto::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.overflow-y-auto::-webkit-scrollbar-thumb {
+  background-color: hsl(var(--muted));
+  border-radius: 3px;
+}
+
+/* ─── ENHANCED TABLE SYSTEM ────────────────────────────────── */
+.t-table {
+  @apply w-full border-collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.t-table thead th {
+  @apply px-4 py-4 text-left border-b border-border/60 bg-muted/20 font-bold uppercase tracking-widest text-muted-foreground/80;
+  font-size: var(--text-xs);
+}
+
+.t-table tbody td {
+  @apply px-4 py-5 border-b border-border/30 align-middle;
+  font-size: var(--text-base);
+  line-height: 1.5;
+}
+
+.t-table tbody tr {
+  @apply transition-colors duration-150;
+}
+
+.t-table tbody tr:hover {
+  @apply bg-muted/30;
+}
+
+.t-table-compact thead th {
+  @apply py-3 px-3;
+}
+
+.t-table-compact tbody td {
+  @apply py-3.5 px-3;
+}
+
+/* ─── CARD ADJUSTMENTS ─────────────────────────────────────── */
+.card-content-premium {
+  @apply p-6 md:p-8;
+}
+
+.card-header-premium {
+  @apply px-6 pt-6 pb-2 md:px-8 md:pt-8;
+}
+
+/* ─── RESPONSIVE DIALOG (fullscreen on small screens) ────────── */
+@media (max-width: 640px) {
+  [role="dialog"] {
+    max-width: 95vw !important;
+    max-height: 95vh !important;
+  }
+}
+
+/* ─── TYPOGRAPHY SYSTEM ──────────────────────────────────────── */
+/*
+   Scale  Token              Size   Weight  Usage
+   ─────  ─────────────────  ─────  ──────  ─────────────────────────────
+   32px   .t-display         2xl    700     Hero / empty state headlines
+   24px   .t-page-title      xl     700     Page H1
+   20px   .t-section-title   lg     600     Section / card headers
+   16px   .t-card-title      base   600     Card titles, modal titles
+   14px   .t-body            sm     400     Default body copy
+   13px   .t-body-sm         [13]   400     Table content, descriptions
+   12px   .t-caption         xs     500     Labels, captions, subtitles
+   11px   .t-label           [11]   600     ALL-CAPS metadata labels
+   10px   .t-micro           [10]   500     Timestamps, footnotes
+*/
+@layer utilities {
+  .t-display {
+    font-size: var(--text-3xl);
+    @apply font-bold tracking-tight leading-[1.3];
+  }
+
+  .t-page-title {
+    font-size: var(--text-2xl);
+    @apply font-bold tracking-tight leading-[1.3];
+  }
+
+  .t-section-title {
+    font-size: var(--text-lg);
+    @apply font-semibold tracking-tight leading-[1.4];
+  }
+
+  .t-card-title {
+    font-size: var(--text-md);
+    @apply font-semibold leading-[1.4];
+  }
+
+  .t-body {
+    font-size: var(--text-base);
+    @apply leading-relaxed;
+  }
+
+  .t-body-sm {
+    font-size: var(--text-base);
+    @apply leading-relaxed;
+  }
+
+  .t-caption {
+    font-size: var(--text-base);
+    @apply font-medium;
+  }
+
+  .t-label {
+    font-size: var(--text-base);
+    @apply font-semibold uppercase tracking-widest text-muted-foreground;
+  }
+
+  .t-micro {
+    font-size: var(--text-xs);
+    @apply font-medium text-muted-foreground;
+  }
+
+  /* Extra small helper text */
+  .t-helper {
+    font-size: 0.75rem; /* 12px */
+    @apply font-normal text-muted-foreground/80;
+  }
+
+  /* Legacy aliases — keep for backward compat */
+  .text-page-title {
+    @apply t-page-title;
+  }
+
+  .text-section-header {
+    @apply t-section-title;
+  }
+
+  .text-body {
+    @apply t-body;
+  }
+
+  .text-label {
+    @apply t-label;
+  }
+
+  /* KPI values — large, tabular, prominent */
+  .t-kpi {
+    font-size: var(--text-2xl);
+    @apply font-black tabular-nums tracking-tight leading-none;
+  }
+
+  .t-kpi-sm {
+    font-size: var(--text-xl);
+    @apply font-bold tabular-nums tracking-tight leading-none;
+  }
+}
+
+/* ─── RESPONSIVE TYPOGRAPHY ──────────────────────────────────── */
+@media (max-width: 640px) {
+  .t-display {
+    @apply text-xl;
+  }
+
+  .t-page-title {
+    @apply text-lg;
+  }
+
+  .t-section-title {
+    @apply text-base;
+  }
+
+  .t-kpi {
+    @apply text-xl;
+  }
+}

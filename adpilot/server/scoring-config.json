@@ -1,0 +1,98 @@
+{
+  "version": "2.0-quadratic",
+  "description": "Quadratic Decay-Based Scoring Configuration for Mojo AdCortex Health Scoring System v2.0",
+  "note": "Uses quadratic decay formulas (1 - 1.5d - 5d²) instead of linear interpolation. Accelerated penalties as metrics drift further from target.",
+  "thresholds": {
+    "cost": {
+      "_comment": "Thresholds for cost metrics (CPL, CPC, CPQL, CPSV) using continuous formula",
+      "_formula": "Score = 100 when ratio≤1.0, interpolates to 40 at red_mult, to 0 at floor_mult",
+      "target_ratio": 1.0,
+      "_target_comment": "Ratio = 1.0 means at target (e.g., CPL = target) → score 100",
+      "red_multiplier": 1.5,
+      "_red_comment": "Ratio = 1.5 means 50% over target → score ~50 (RED threshold)",
+      "floor_multiplier": 2.0,
+      "_floor_comment": "Ratio = 2.0 means 2× target → score 0",
+      "excellent_floor": 40,
+      "_excellent_comment": "Minimum score in the excellent range (between 40-99)"
+    },
+    "budget": {
+      "_comment": "Thresholds for budget pacing using continuous formula",
+      "_formula": "Score = 100 at perfect pacing (0% deviation), drops to 50 at red_deviation, to 0 beyond",
+      "target_deviation": 0.0,
+      "_target_comment": "Deviation = 0.0 means 100% pacing (perfect) → score 100",
+      "red_deviation": 0.30,
+      "_red_comment": "Deviation = 0.30 means ±30% pacing → score ~50 (RED threshold)",
+      "excellent_floor": 40,
+      "_excellent_comment": "Minimum score in the excellent range (between 40-99)"
+    }
+  },
+  "weights": {
+    "google": {
+      "account_level": {
+        "_comment": "Google account health score weights (sum should = 100)",
+        "cpsv": 25,
+        "budget": 25,
+        "cpql": 20,
+        "cpl": 20,
+        "creative": 10
+      }
+    },
+    "meta": {
+      "account_level": {
+        "_comment": "Meta account health score weights (sum should = 100)",
+        "cpsv": 25,
+        "budget": 25,
+        "cpql": 20,
+        "cpl": 20,
+        "creative": 10
+      }
+    }
+  },
+  "override_rules": {
+    "red_metric_weight_threshold": 15,
+    "_comment_red_metric": "If any metric with weight >= this value is RED (< 50), cap final composite to YELLOW",
+    "red_cap_threshold": 74,
+    "_comment_red_cap": "Maximum composite score when RED override applies"
+  },
+  "classification": {
+    "green_threshold": 75,
+    "yellow_threshold": 55,
+    "orange_threshold": 35,
+    "_comment": "Dual-gate status: GREEN >= 75 AND min_ratio >= 0.40, YELLOW >= 55 AND min_ratio >= 0.20, ORANGE >= 35 AND min_ratio >= 0.05, RED < 35 OR min_ratio < 0.05"
+  },
+  "formula_examples": {
+    "cost_example_cpl": {
+      "target": 700,
+      "actual": 729,
+      "deviation": 0.041,
+      "calculation": "d = (729-700)/700 = 0.041. Score = 100 * max(0, 1 - 1.5*0.041 - 5*0.041²) = 100 * (1 - 0.0615 - 0.0084) = 100 * 0.9301 = 93.01",
+      "explanation": "4.1% over target → excellent (93 score)"
+    },
+    "cost_example_cpql": {
+      "target": 2950,
+      "actual": 4481,
+      "deviation": 0.519,
+      "calculation": "d = (4481-2950)/2950 = 0.519. Score = 100 * max(0, 1 - 1.5*0.519 - 5*0.519²) = 100 * (1 - 0.779 - 1.346) = 100 * max(0, -1.125) = 0",
+      "explanation": "51.9% over target → RED floor (0 score)"
+    },
+    "budget_example_overpaced": {
+      "pacing_percent": 108.6,
+      "deviation": 0.086,
+      "calculation": "b = |108.6/100 - 1| = 0.086. Score = 100 * max(0, 1 - 0.086 - 10*0.086²) = 100 * (1 - 0.086 - 0.074) = 100 * 0.84 = 84",
+      "explanation": "8.6% overspend → strong yellow (84 score)"
+    },
+    "budget_example_perfect": {
+      "pacing_percent": 100,
+      "deviation": 0.0,
+      "calculation": "b = 0. Score = 100 * max(0, 1 - 0 - 0) = 100",
+      "explanation": "Perfect pacing → 100 score"
+    }
+  },
+  "notes": {
+    "migration_v1_to_v2": "Migrated from linear interpolation to quadratic decay (1 - 1.5d - 5d²). Penalties accelerate as metrics drift further from target, reflecting real-world urgency.",
+    "dual_gate_system": "v2.0 introduces dual-gate status: composite score + weakest-link veto. Prevents a single weak metric from hiding behind strong overall performance.",
+    "creative_health_upgrade": "Creative score now uses spend-weighted average + diversity factor instead of simple unweighted average. Concentrates risk is penalized.",
+    "status_bands_changed": "YELLOW threshold raised from 50 to 55. New ORANGE status level at 35. Mapping: GREEN=WINNER, YELLOW=WATCH, ORANGE=WATCH, RED=UNDERPERFORMER.",
+    "backward_compatibility": "Scores will change significantly from v1.0 (especially for metrics 20-30% over target). Thresholds tuned for business intent alignment."
+  }
+}

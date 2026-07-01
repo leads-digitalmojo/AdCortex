@@ -1,0 +1,758 @@
+{
+  "version": "1.0",
+  "lastUpdated": "2026-04-13",
+  "source": "docs/Sop-Dump.md",
+  "description": "Structured Standard Operating Procedures for ad optimization across Meta and Google platforms",
+  "shared_sops": [
+    {
+      "id": "cpl_deviation_account",
+      "name": "Critical CPL Deviation (Account Level)",
+      "category": "efficiency",
+      "metric": "cpl",
+      "platforms": [
+        "meta",
+        "google"
+      ],
+      "entityType": "account",
+      "enabled": true,
+      "priority": "CRITICAL",
+      "iceScore": 9,
+      "condition": {
+        "type": "threshold",
+        "field": "overall_cpl",
+        "operator": ">",
+        "value": 1.5,
+        "reference": "target_cpl"
+      },
+      "issue": "Critical CPL Deviation",
+      "impactTemplate": "Account CPL (₹{overall_cpl}) is {ratio}x target.",
+      "recommendation": "Immediate pause of bottom 20% underperforming entities required to stabilize budget.",
+      "notes": "From SOP Dump: Account-level CPL monitoring"
+    },
+    {
+      "id": "zero_leads_drain",
+      "name": "Budget Drain (Zero Leads)",
+      "category": "efficiency",
+      "metric": "leads",
+      "platforms": [
+        "meta",
+        "google"
+      ],
+      "entityType": "campaign",
+      "enabled": true,
+      "priority": "CRITICAL",
+      "iceScore": 10,
+      "condition": {
+        "type": "compound",
+        "operator": "AND",
+        "conditions": [
+          {
+            "field": "spend",
+            "operator": ">",
+            "value": 2,
+            "reference": "target_cpl"
+          },
+          {
+            "field": "leads",
+            "operator": "==",
+            "value": 0
+          }
+        ]
+      },
+      "issue": "Budget Drain (Zero Leads)",
+      "impactTemplate": "Campaign \"{name}\" has spent ₹{spend} with no results.",
+      "recommendationTemplate": "Pause campaign \"{name}\" immediately.",
+      "notes": "From SOP Dump: Daily Optimizations - conversion tracking sanity"
+    },
+    {
+      "id": "cpl_above_threshold",
+      "name": "CPL Above Target Threshold",
+      "category": "efficiency",
+      "metric": "cpl",
+      "platforms": [
+        "meta",
+        "google"
+      ],
+      "entityType": "campaign",
+      "enabled": true,
+      "priority": "HIGH",
+      "iceScore": 8,
+      "condition": {
+        "type": "threshold",
+        "field": "cpl",
+        "operator": ">",
+        "value": 1.3,
+        "reference": "target_cpl"
+      },
+      "issue": "CPL Above Target",
+      "impactTemplate": "Campaign \"{name}\" CPL (₹{cpl}) exceeds target (₹{target_cpl}) by {ratio}x.",
+      "recommendation": "Review audience targeting, creative quality, or landing page experience.",
+      "notes": "From SOP Dump: Cost stack triage"
+    },
+    {
+      "id": "cvr_floor_breach",
+      "name": "Conversion Rate Floor Breach",
+      "category": "conversion",
+      "metric": "cvr",
+      "platforms": [
+        "meta",
+        "google"
+      ],
+      "entityType": "campaign",
+      "enabled": true,
+      "priority": "HIGH",
+      "iceScore": 8,
+      "condition": {
+        "type": "compound",
+        "operator": "AND",
+        "conditions": [
+          {
+            "field": "cpl",
+            "operator": ">",
+            "value": 1.3,
+            "reference": "target_cpl"
+          },
+          {
+            "field": "cvr",
+            "operator": "<",
+            "value": 3,
+            "reference": "platform_benchmark",
+            "platformThresholds": {
+              "google": 3,
+              "meta": 4
+            }
+          },
+          {
+            "field": "leads",
+            "operator": ">",
+            "value": 0
+          }
+        ]
+      },
+      "issue": "Conversion Rate Floor Breach",
+      "impactTemplate": "CVR ({cvr}%) is below acceptable floor ({benchmark}%) for {platform}.",
+      "recommendation": "Audit landing page experience and lead form friction. Simplify form or reduce fields.",
+      "notes": "From SOP Dump: Cost stack triage - CTR/CVR diagnostics"
+    },
+    {
+      "id": "algorithm_learning_trap",
+      "name": "Algorithm Learning Trap",
+      "category": "learning",
+      "metric": "performance",
+      "platforms": [
+        "meta",
+        "google"
+      ],
+      "entityType": "campaign",
+      "enabled": true,
+      "priority": "HIGH",
+      "iceScore": 7,
+      "condition": {
+        "type": "compound",
+        "operator": "AND",
+        "conditions": [
+          {
+            "field": "days_active",
+            "operator": ">",
+            "value": 7
+          },
+          {
+            "field": "leads",
+            "operator": "<",
+            "value": 5
+          },
+          {
+            "field": "impressions",
+            "operator": ">",
+            "value": 5000
+          },
+          {
+            "field": "spend",
+            "operator": ">",
+            "value": 2,
+            "reference": "target_cpl"
+          }
+        ]
+      },
+      "issue": "Algorithm Learning Trap",
+      "impactTemplate": "\"{name}\" has been active {days_active} days with only {leads} leads from {impressions} impressions.",
+      "recommendation": "Algorithm is stuck learning; reset campaign with broader targeting or switch to 'Clicks' optimization focus temporarily to build signal.",
+      "notes": "FIX #7: spend > target_cpl * 2 (was target_cpl — wrong units). guards: daysActive > 7, leads < 5, imps > 5000"
+    },
+    {
+      "id": "tracking_anomaly_cvr",
+      "name": "Tracking Anomaly (CVR Drop)",
+      "category": "tracking",
+      "metric": "conversion_rate",
+      "platforms": [
+        "meta",
+        "google"
+      ],
+      "entityType": "campaign",
+      "enabled": true,
+      "priority": "CRITICAL",
+      "iceScore": 9,
+      "condition": {
+        "type": "threshold",
+        "field": "cvr",
+        "operator": "<",
+        "value": 0.5,
+        "reference": "trailing_7day_average",
+        "threshold": 0.5
+      },
+      "issue": "Tracking Anomaly (CVR Drop)",
+      "impactTemplate": "CVR dropped to {cvr}% (< 50% of 7-day average {baseline}%), indicating possible tracking issue.",
+      "recommendation": "Check LP/TP tracking, conversion tag firing, form validation issues, or GA4/Ads sync problems. Verify gclid/fbp/wbraid capture and webhook latency.",
+      "notes": "From SOP Dump: Daily Optimizations - conversions & CVR outliers; guard: CVR < 50% of trailing 7-day avg"
+    },
+    {
+      "id": "top_performer_scaling",
+      "name": "Top Performer Scaling Opportunity",
+      "category": "optimization",
+      "metric": "cpl",
+      "platforms": [
+        "meta",
+        "google"
+      ],
+      "entityType": "campaign",
+      "enabled": true,
+      "priority": "MEDIUM",
+      "iceScore": 6,
+      "condition": {
+        "type": "compound",
+        "operator": "AND",
+        "conditions": [
+          {
+            "field": "leads",
+            "operator": ">=",
+            "value": 5
+          },
+          {
+            "field": "cpl",
+            "operator": "<",
+            "value": 0.7,
+            "reference": "target_cpl"
+          }
+        ]
+      },
+      "issue": "Top Performer Opportunity",
+      "impactTemplate": "Consistent leads at ₹{cpl} CPL (30% below target)—volume opportunity available.",
+      "recommendationTemplate": "Scale budget for \"{name}\" by 20-25% to capture more volume while maintaining efficiency.",
+      "notes": "From SOP Dump: Winner Scaling playbook; identifies high-efficiency campaigns for budget allocation"
+    },
+    {
+      "id": "account_health_pulse",
+      "name": "Account Health Pulse Check",
+      "category": "health",
+      "metric": "overall",
+      "platforms": [
+        "meta",
+        "google"
+      ],
+      "entityType": "account",
+      "enabled": true,
+      "priority": "MEDIUM",
+      "iceScore": 5,
+      "condition": {
+        "type": "compound",
+        "operator": "OR",
+        "conditions": [
+          {
+            "field": "spend",
+            "operator": "vs_plan",
+            "threshold": 0.2
+          },
+          {
+            "field": "disapprovals_count",
+            "operator": ">",
+            "value": 0
+          },
+          {
+            "field": "leads_today",
+            "operator": "==",
+            "value": 0
+          }
+        ]
+      },
+      "issue": "Account Health Alert",
+      "impactTemplate": "Health check failed: spend variance {spend_variance}%, {disapprovals} disapprovals, {leads_today} leads today.",
+      "recommendation": "Review daily health metrics: spend vs plan (±20%), disapprovals/limits, conversion tracking sanity. Fix high-priority issues immediately.",
+      "notes": "From SOP Dump: Daily Optimizations - health & pacing checks"
+    },
+    {
+      "id": "audience_quality_issue",
+      "name": "Audience Quality Issue",
+      "category": "audience",
+      "metric": "lead_quality",
+      "platforms": [
+        "meta",
+        "google"
+      ],
+      "entityType": "campaign",
+      "enabled": true,
+      "priority": "HIGH",
+      "iceScore": 7,
+      "condition": {
+        "type": "compound",
+        "operator": "AND",
+        "conditions": [
+          {
+            "field": "cpl",
+            "operator": "stable"
+          },
+          {
+            "field": "lead_quality",
+            "operator": "<",
+            "value": 0.6,
+            "reference": "hot_warm_ratio"
+          }
+        ]
+      },
+      "issue": "Audience Quality Issue",
+      "impactTemplate": "CPL stable but lead quality (Hot+Warm ratio: {quality_ratio}) indicates audience mismatch.",
+      "recommendation": "Add tighter lead form filters (budget band, location, timeline). Update audience targeting or exclude low-intent segments. Review form questions for clearer qualification.",
+      "notes": "From SOP Dump: Weekly Optimizations - quality buckets; identifies mismatch between cost and quality"
+    },
+    {
+      "id": "critical_creative_failure",
+      "name": "Critical Creative Failure",
+      "category": "creative",
+      "metric": "creative_performance",
+      "platforms": [
+        "meta",
+        "google"
+      ],
+      "entityType": "ad",
+      "enabled": true,
+      "priority": "CRITICAL",
+      "iceScore": 9,
+      "condition": {
+        "type": "compound",
+        "operator": "OR",
+        "conditions": [
+          {
+            "field": "creative_score",
+            "operator": ">",
+            "value": 0
+          },
+          {
+            "field": "creative_score",
+            "operator": "<",
+            "value": 35
+          }
+        ]
+      },
+      "issue": "Critical Creative Failure",
+      "impactTemplate": "Ad has critical performance score ({creative_score}), indicating immediate pause needed.",
+      "recommendation": "Pause ad immediately to recapture budget. Review creative elements (visual, copy, hook) and test new creative variant.",
+      "notes": "From SOP Dump: Creative & Video Creation - diagnostics based on performance score thresholds"
+    },
+    {
+      "id": "creative_age_fatigue",
+      "name": "Advanced Creative Fatigue",
+      "category": "creative",
+      "metric": "creative_age",
+      "platforms": [
+        "meta",
+        "google"
+      ],
+      "entityType": "ad",
+      "enabled": true,
+      "priority": "HIGH",
+      "iceScore": 7,
+      "condition": {
+        "type": "compound",
+        "operator": "OR",
+        "conditions": [
+          {
+            "field": "creative_age_days",
+            "operator": ">",
+            "value": 45
+          },
+          {
+            "field": "creative_age_days",
+            "operator": ">",
+            "value": 35
+          }
+        ]
+      },
+      "issue": "Advanced Creative Fatigue",
+      "impactTemplate": "Creative is {creative_age_days} days old with decaying CTR signals.",
+      "recommendation": "Queue creative refresh with fresh visual angle or new headline hook. Test new creative variant in parallel.",
+      "notes": "From SOP Dump: Creative refresh playbook - 14-21 day refresh window recommended; fatigue signals: rising freq with falling CTR"
+    },
+    {
+      "id": "account_ctr_critically_low",
+      "name": "Account CTR Critically Low",
+      "category": "creative",
+      "metric": "ctr",
+      "platforms": [
+        "meta",
+        "google"
+      ],
+      "entityType": "account",
+      "enabled": true,
+      "priority": "HIGH",
+      "iceScore": 8,
+      "condition": {
+        "type": "threshold",
+        "field": "overall_ctr",
+        "operator": "<",
+        "value": 0.6
+      },
+      "issue": "Account CTR Critically Low",
+      "impactTemplate": "Account CTR ({overall_ctr}%) is below the 0.7% minimum threshold — creatives are failing to stop the scroll.",
+      "recommendation": "Audit all active ads for creative age (>21 days = fatigue risk). Pause scroll-ignored ads (CTR <0.4%). Test Reels-first format with disruptive first-frame hooks. Segment retargeting audiences from cold audiences to improve relevance.",
+      "notes": "From SOP Dump: Meta ads — CTR <0.7% triggers creative fatigue review. Reels format benchmarks 2-3x CTR vs static in 2026."
+    },
+    {
+      "id": "cpl_extreme_deviation",
+      "name": "Extreme CPL Deviation (>2x Target)",
+      "category": "efficiency",
+      "metric": "cpl",
+      "platforms": [
+        "meta",
+        "google"
+      ],
+      "entityType": "campaign",
+      "enabled": true,
+      "priority": "CRITICAL",
+      "iceScore": 9,
+      "condition": {
+        "type": "threshold",
+        "field": "cpl",
+        "operator": ">",
+        "value": 2,
+        "reference": "target_cpl"
+      },
+      "issue": "Extreme CPL Deviation (>2x Target)",
+      "impactTemplate": "Campaign \"{name}\" CPL (₹{cpl}) is {ratio}x target — cost stack breakdown required.",
+      "recommendation": "Run cost-stack triage: (1) Check CPM — if >₹150 = audience/creative issue; (2) Check CTR — if <0.5% = hook failing; (3) Check CVR — if <3% = landing page friction. Fix at the broken layer, not by blanket pausing.",
+      "notes": "From SOP Dump: CPL >2x requires cost-stack diagnosis across CPM → CTR → CVR before any action."
+    },
+    {
+      "id": "budget_reallocation_opportunity",
+      "name": "Budget Reallocation to Winner",
+      "category": "efficiency",
+      "metric": "cpl",
+      "platforms": [
+        "meta",
+        "google"
+      ],
+      "entityType": "account",
+      "enabled": true,
+      "priority": "HIGH",
+      "iceScore": 8,
+      "condition": {
+        "type": "compound",
+        "operator": "AND",
+        "conditions": [
+          {
+            "field": "winner_count",
+            "operator": ">=",
+            "value": 1
+          },
+          {
+            "field": "loser_count",
+            "operator": ">=",
+            "value": 1
+          }
+        ]
+      },
+      "issue": "Budget Reallocation Opportunity",
+      "impactTemplate": "{winner_count} winner(s) running alongside {loser_count} underperformer(s) — budget is split inefficiently.",
+      "recommendation": "Shift 25% of underperformer budget to the top winner. Scale winner by max 25% at a time (avoids learning phase reset). Cap underperformer budget rather than pausing (maintains data signal). Monitor frequency post-scale — if >2.5, creative rotation required.",
+      "notes": "From SOP Dump: Winner scaling playbook — gradual 20-25% budget shifts prevent Meta algorithm disruption."
+    },
+    {
+      "id": "landing_page_cvr_drop",
+      "name": "Landing Page / Form Friction (CVR Drop)",
+      "category": "conversion",
+      "metric": "cvr",
+      "platforms": [
+        "meta",
+        "google"
+      ],
+      "entityType": "campaign",
+      "enabled": true,
+      "priority": "HIGH",
+      "iceScore": 8,
+      "condition": {
+        "type": "compound",
+        "operator": "AND",
+        "conditions": [
+          {
+            "field": "ctr",
+            "operator": ">",
+            "value": 0.7
+          },
+          {
+            "field": "cvr",
+            "operator": "<",
+            "value": 3
+          },
+          {
+            "field": "leads",
+            "operator": ">",
+            "value": 0
+          }
+        ]
+      },
+      "issue": "Funnel Drop — Landing Page or Form Friction",
+      "impactTemplate": "Campaign \"{name}\" has acceptable CTR ({ctr}%) but low CVR ({cvr}%) — clicks are not converting to leads.",
+      "recommendation": "The creative is working (CTR ok) but the funnel is broken after the click. Actions: (1) Switch from website landing page to Meta Lead Form to reduce friction; (2) If keeping LP — check page speed (<3s), mobile UX, form field count (max 4 fields); (3) Add price anchor + location to the form headline for higher intent qualification.",
+      "notes": "From SOP Dump: High CTR + Low CVR = post-click funnel failure, not creative failure. Lead form typically 2-3x better CVR than LP for real estate."
+    }
+  ],
+  "meta_sops": [
+    {
+      "id": "cpc_inflation_meta",
+      "name": "CPC Inflation (Meta)",
+      "category": "cost",
+      "metric": "cpc",
+      "platforms": [
+        "meta"
+      ],
+      "entityType": "campaign",
+      "enabled": true,
+      "priority": "MEDIUM",
+      "iceScore": 6,
+      "condition": {
+        "type": "threshold",
+        "field": "avg_cpc",
+        "operator": ">",
+        "value": 45
+      },
+      "issue": "CPC Inflation",
+      "impactTemplate": "CPC (₹{cpc}) exceeds Meta benchmark (₹45) and is pushing CPL above target.",
+      "recommendation": "Review bidding strategy, audience overlap, or creative quality. Check for audience duplication between ad sets that increases auction friction.",
+      "notes": "From SOP Dump: Meta Ads - Daily Optimizations; audience/creative is king"
+    },
+    {
+      "id": "creative_fatigue_detected",
+      "name": "Creative Fatigue Detected",
+      "category": "creative",
+      "metric": "engagement",
+      "platforms": [
+        "meta"
+      ],
+      "entityType": "adset",
+      "enabled": true,
+      "priority": "HIGH",
+      "iceScore": 7,
+      "condition": {
+        "type": "compound",
+        "operator": "AND",
+        "conditions": [
+          {
+            "field": "cpm",
+            "operator": "increased",
+            "comparison": "baseline"
+          },
+          {
+            "field": "ctr",
+            "operator": "decreased",
+            "comparison": "baseline"
+          },
+          {
+            "field": "frequency",
+            "operator": ">",
+            "platformThresholds": {
+              "tofu_mofu": 2.5,
+              "bofu": 4
+            }
+          }
+        ]
+      },
+      "issue": "Creative Fatigue Detected",
+      "impactTemplate": "Rising CPM (↑), falling CTR (↓), frequency {frequency} indicates audience fatigue with current creative.",
+      "recommendation": "Queue 2-3 new creative variants immediately. Reuse winning motifs (price on image, testimonials, problem-agitate, benefits). Do NOT pause—refresh and iterate.",
+      "notes": "From SOP Dump: Meta Ads - Bi-weekly Optimizations; fatigue signs: freq >2.5 TOFU/MOFU, >4 BOFU with rising CPM + falling CTR"
+    },
+    {
+      "id": "cpm_baseline_deviation",
+      "name": "CPM Baseline Deviation",
+      "category": "cost",
+      "metric": "cpm",
+      "platforms": [
+        "meta"
+      ],
+      "entityType": "campaign",
+      "enabled": true,
+      "priority": "MEDIUM",
+      "iceScore": 6,
+      "condition": {
+        "type": "threshold",
+        "field": "cpm",
+        "operator": ">",
+        "value": 1.5,
+        "reference": "platform_baseline",
+        "baseline": 120
+      },
+      "issue": "CPM Above Baseline",
+      "impactTemplate": "CPM (₹{cpm}) is +50% above platform baseline (₹{baseline}) with worsening CTR/CPL.",
+      "recommendation": "Queue creative refresh or audience trim for weekly. Check for audience overlap between ad sets. Reduce frequency or narrow targeting.",
+      "notes": "From SOP Dump: Meta Ads - Demand Gen quick look; baseline CPM ~₹120"
+    },
+    {
+      "id": "creative_rotation_needed",
+      "name": "Creative Rotation Overdue",
+      "category": "creative",
+      "metric": "ctr",
+      "platforms": [
+        "meta"
+      ],
+      "entityType": "adset",
+      "enabled": true,
+      "priority": "HIGH",
+      "iceScore": 8,
+      "condition": {
+        "type": "compound",
+        "operator": "AND",
+        "conditions": [
+          {
+            "field": "frequency",
+            "operator": ">",
+            "value": 2
+          },
+          {
+            "field": "ctr",
+            "operator": "<",
+            "value": 0.7
+          }
+        ]
+      },
+      "issue": "Creative Rotation Overdue",
+      "impactTemplate": "Ad set \"{name}\" frequency is {frequency}x with CTR {ctr}% — audience has seen these ads too many times.",
+      "recommendation": "Implement 7-day creative rotation: (1) Introduce 2 new ad variants with fresh hooks (disruptive question or price anchor); (2) Pause lowest-CTR ad; (3) Test Reels format if currently running only static. Do NOT expand audience — rotate creative first.",
+      "notes": "From SOP Dump: Frequency >2.0 with CTR decline = rotation signal, not audience expansion signal."
+    },
+    {
+      "id": "frequency_cap_breach_account",
+      "name": "Account-Level Frequency Cap Breach",
+      "category": "audience",
+      "metric": "frequency",
+      "platforms": [
+        "meta"
+      ],
+      "entityType": "account",
+      "enabled": true,
+      "priority": "MEDIUM",
+      "iceScore": 7,
+      "condition": {
+        "type": "threshold",
+        "field": "overall_frequency",
+        "operator": ">",
+        "value": 2.5
+      },
+      "issue": "Audience Frequency Cap Breach",
+      "impactTemplate": "Account frequency ({overall_frequency}x) exceeds 2.5 — audience fatigue is inflating CPMs and killing CTR.",
+      "recommendation": "Segmented audience reset: (1) Create a retargeting ad set targeting video viewers (50%+) and website visitors from last 30d with the same winning creative — these convert at 3-5x better CPL; (2) Rest the cold broad audience for 7 days; (3) When restarting cold, use a fresh creative angle (not the same ad). Do NOT increase budget into a fatigued audience.",
+      "notes": "From SOP Dump: Frequency >2.5 TOFU/MOFU = audience fatigue; solution is audience segmentation and creative rotation, not budget pause."
+    }
+  ],
+  "google_sops": [
+    {
+      "id": "cpc_inflation_google",
+      "name": "CPC Inflation (Google Search)",
+      "category": "cost",
+      "metric": "cpc",
+      "platforms": [
+        "google"
+      ],
+      "entityType": "campaign",
+      "enabled": true,
+      "priority": "MEDIUM",
+      "iceScore": 6,
+      "condition": {
+        "type": "threshold",
+        "field": "avg_cpc",
+        "operator": ">",
+        "value": 120
+      },
+      "issue": "CPC Inflation",
+      "impactTemplate": "CPC (₹{cpc}) exceeds Google benchmark (₹120) and is pushing CPL above target.",
+      "recommendation": "Review keyword match types, add negatives to shared negative list, or improve Quality Score to reduce CPCs. Focus on Exact/Phrase match keywords only.",
+      "notes": "From SOP Dump: Google Ads - Daily Optimizations; CPC control is critical for Search ROI"
+    },
+    {
+      "id": "impression_share_budget_lost",
+      "name": "Budget-Constrained Delivery",
+      "category": "delivery",
+      "metric": "impression_share",
+      "platforms": [
+        "google"
+      ],
+      "entityType": "campaign",
+      "enabled": true,
+      "priority": "HIGH",
+      "iceScore": 8,
+      "condition": {
+        "type": "threshold",
+        "field": "search_budget_lost_is",
+        "operator": ">",
+        "value": 20
+      },
+      "issue": "Budget-Constrained Delivery",
+      "impactTemplate": "Losing {lost_budget}% of potential traffic due to daily budget caps.",
+      "recommendationTemplate": "Increase daily budget for \"{name}\" by 20% to capture efficient volume.",
+      "notes": "From SOP Dump: Google Ads - Weekly Optimizations; IS Lost (Budget) handling"
+    },
+    {
+      "id": "impression_share_rank_lost",
+      "name": "Rank-Constrained Delivery",
+      "category": "delivery",
+      "metric": "impression_share",
+      "platforms": [
+        "google"
+      ],
+      "entityType": "campaign",
+      "enabled": true,
+      "priority": "MEDIUM",
+      "iceScore": 6,
+      "condition": {
+        "type": "threshold",
+        "field": "search_rank_lost_is",
+        "operator": ">",
+        "value": 40
+      },
+      "issue": "Rank-Constrained Delivery",
+      "impactTemplate": "Losing {lost_rank}% of auction share due to low Ad Rank/Quality Score.",
+      "recommendation": "Improve Ad Copy relevance, increase Quality Score, or adjust bids. Focus on top-performing keywords and ad variations.",
+      "notes": "From SOP Dump: Google Ads - Weekly Optimizations; IS Lost (Rank) handling"
+    },
+    {
+      "id": "quality_score_low",
+      "name": "Low Quality Score Drain",
+      "category": "quality",
+      "metric": "quality_score",
+      "platforms": [
+        "google"
+      ],
+      "entityType": "ad_group",
+      "enabled": true,
+      "priority": "MEDIUM",
+      "iceScore": 5,
+      "condition": {
+        "type": "compound",
+        "operator": "AND",
+        "conditions": [
+          {
+            "field": "quality_score",
+            "operator": ">",
+            "value": 0
+          },
+          {
+            "field": "quality_score",
+            "operator": "<",
+            "value": 6
+          }
+        ]
+      },
+      "issue": "Low Quality Score Drain",
+      "impactTemplate": "Quality Score {quality_score} is below 6, inflating CPCs and reducing visibility.",
+      "recommendation": "Audit landing page relevance, improve ad copy alignment with keywords, and enhance expected CTR. Focus on keyword-to-ad-to-LP message match.",
+      "notes": "From SOP Dump: Google Ads - Quality Score is the primary lever for reducing CPCs in Search"
+    }
+  ]
+}

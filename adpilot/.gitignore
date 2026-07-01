@@ -1,0 +1,17 @@
+node_modules
+dist
+.DS_Store
+server/public
+vite.config.ts.*
+*.tar.gz
+.env
+*.log
+
+# Credentials and Data (DO NOT REMOVE)
+ads_agent/google_ads_credentials.json
+ads_agent/data/
+ads_agent/data/clients_credentials.json
+
+# Local Postgres data directory (dev only)
+data/
+data/**

@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+
+# Python virtual environments
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Credentials & secrets
+google_ads_credentials.json
+.google_ads_token_cache.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build output
+dist/
+server/public/
+
+# Logs
+*.log
+
+# Local Postgres data directory (dev only)
+adpilot/data/
+adpilot/data/**
+
+# Agent runtime status & data
+ads_agent/data/
+ads_agent/.google_ads_token_cache.json
+
+# Archives
+*.tar.gz

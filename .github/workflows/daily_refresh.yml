@@ -1,0 +1,80 @@
+name: Daily Ad Agent Refresh
+
+on:
+  schedule:
+    # 9:00 AM IST (3:30 AM UTC)
+    - cron: '30 3 * * *'
+  # Allow manual triggering for testing
+  workflow_dispatch:
+
+jobs:
+  refresh-data:
+    runs-on: ubuntu-latest
+    
+    # Required for GITHUB_TOKEN to push to main
+    permissions:
+      contents: write
+      
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r ads_agent/requirements.txt
+
+      - name: Create Data Directory
+        run: mkdir -p ads_agent/data
+
+      - name: Run Agents
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # Fallback secrets for single-client setup
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          META_AD_ACCOUNT_ID: ${{ secrets.META_AD_ACCOUNT_ID }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          GOOGLE_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_DEVELOPER_TOKEN }}
+          GOOGLE_MCC_ID: ${{ secrets.GOOGLE_MCC_ID }}
+          GOOGLE_CUSTOMER_ID: ${{ secrets.GOOGLE_CUSTOMER_ID }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          OPENAPI_API_KEY: ${{ secrets.OPENAPI_API_KEY }}
+        run: |
+          echo "Syncing clients from database..."
+          python ads_agent/fetch_clients.py
+          
+          REG_PATH="ads_agent/data/clients_registry.json"
+          
+          if [ -f "$REG_PATH" ]; then
+            echo "Processing clients from registry..."
+            # Loop through each client ID found in the registry
+            for client in $(jq -r '.[] | .id' "$REG_PATH"); do
+              echo "------------------------------------------------------"
+              echo "RUNNING ANALYSIS FOR CLIENT: $client"
+              echo "------------------------------------------------------"
+              python ads_agent/meta_ads_agent_v2.py --multi-cadence --client "$client" || echo "Meta analysis failed for $client"
+              python ads_agent/google_ads_agent_v2.py --multi-cadence --client "$client" || echo "Google analysis failed for $client"
+            done
+          else
+            echo "No registry found. Running default configuration (Amara)."
+            python ads_agent/meta_ads_agent_v2.py --multi-cadence
+            python ads_agent/google_ads_agent_v2.py --multi-cadence
+          fi
+
+      - name: Commit and Push Data Updates
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ads_agent/data/
+          git commit -m "chore: auto-refresh ad data [$(date +'%Y-%m-%d %H:%M')]" || echo "No changes to commit"
+          git push

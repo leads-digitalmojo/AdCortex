@@ -1,0 +1,6 @@
+facebook-business==19.0.3
+google-ads==24.1.0
+requests==2.32.3
+python-dotenv==1.0.1
+pandas==2.2.2
+psycopg2-binary==2.9.9
