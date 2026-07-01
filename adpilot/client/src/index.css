@@ -9,44 +9,44 @@
   --opaque-button-border-intensity: -8;
   --elevate-1: rgba(15, 23, 42, .03);
   --elevate-2: rgba(15, 23, 42, .08);
-  --background: 42 33% 98%;
-  --foreground: 220 24% 12%;
-  --border: 220 16% 88%;
+  --background: 0 0% 97%;
+  --foreground: 0 0% 4%;
+  --border: 0 0% 91%;
   --card: 0 0% 100%;
-  --card-foreground: 220 24% 12%;
-  --card-border: 220 18% 92%;
-  --sidebar: 40 42% 97%;
-  --sidebar-foreground: 220 24% 12%;
-  --sidebar-border: 220 16% 89%;
-  --sidebar-primary: 47 100% 47%;
-  --sidebar-primary-foreground: 0 0% 5%;
-  --sidebar-accent: 45 70% 94%;
-  --sidebar-accent-foreground: 220 24% 12%;
-  --sidebar-ring: 47 100% 47%;
+  --card-foreground: 0 0% 4%;
+  --card-border: 0 0% 91%;
+  --sidebar: 0 0% 100%;
+  --sidebar-foreground: 0 0% 4%;
+  --sidebar-border: 0 0% 92%;
+  --sidebar-primary: 47 100% 50%;
+  --sidebar-primary-foreground: 0 0% 4%;
+  --sidebar-accent: 48 100% 92%;
+  --sidebar-accent-foreground: 0 0% 4%;
+  --sidebar-ring: 47 100% 50%;
   --popover: 0 0% 100%;
-  --popover-foreground: 220 24% 12%;
-  --popover-border: 220 16% 88%;
-  --primary: 45 100% 55%;
-  --primary-foreground: 0 0% 0%;
-  --secondary: 40 21% 95%;
-  --secondary-foreground: 220 24% 12%;
-  --muted: 42 18% 95%;
-  --muted-foreground: 218 12% 38%;
-  --accent: 45 73% 94%;
-  --accent-foreground: 220 24% 12%;
+  --popover-foreground: 0 0% 4%;
+  --popover-border: 0 0% 91%;
+  --primary: 47 100% 50%;
+  --primary-foreground: 0 0% 4%;
+  --secondary: 0 0% 96%;
+  --secondary-foreground: 0 0% 4%;
+  --muted: 0 0% 96%;
+  --muted-foreground: 0 0% 40%;
+  --accent: 48 100% 92%;
+  --accent-foreground: 0 0% 4%;
   --destructive: 0 73% 55%;
   --destructive-foreground: 0 0% 100%;
-  --input: 220 16% 82%;
-  --ring: 45 100% 55%;
-  --chart-1: 45 100% 55%;
+  --input: 0 0% 88%;
+  --ring: 47 100% 50%;
+  --chart-1: 47 100% 50%;
   --chart-2: 220 68% 45%;
   --chart-3: 146 52% 42%;
   --chart-4: 11 77% 56%;
   --chart-5: 215 16% 42%;
-  --font-sans: "League Spartan", system-ui, sans-serif;
+  --font-sans: "Poppins", system-ui, sans-serif;
   --font-serif: Georgia, serif;
   --font-mono: "JetBrains Mono", monospace;
-  --radius: .6rem;
+  --radius: .875rem;
   --shadow-2xs: 0 1px 2px 0 hsl(220 25% 10% / 0.04);
   --shadow-xs: 0 2px 4px 0 hsl(220 25% 10% / 0.06), 0 1px 2px -1px hsl(220 25% 10% / 0.03);
   --shadow-sm: 0 4px 10px -4px hsl(220 25% 10% / 0.08), 0 2px 4px -2px hsl(220 25% 10% / 0.05);
@@ -67,11 +67,11 @@
   --text-3xl: 2rem;      /* 32px */
 
   /* Compatibility fallbacks */
-  --primary-border: hsl(45 100% 45%);
-  --sidebar-primary-border: hsl(45 100% 45%);
-  --secondary-border: hsl(40 21% 90%);
-  --muted-border: hsl(42 18% 90%);
-  --accent-border: hsl(45 73% 90%);
+  --primary-border: hsl(47 100% 44%);
+  --sidebar-primary-border: hsl(47 100% 44%);
+  --secondary-border: hsl(0 0% 90%);
+  --muted-border: hsl(0 0% 90%);
+  --accent-border: hsl(48 90% 86%);
 }
 
 /* DARK MODE - Deep Navy Analytics Theme */
@@ -157,9 +157,7 @@
     font-weight: 400;
     line-height: 1.6;
     letter-spacing: 0.01em;
-    background-image:
-      radial-gradient(circle at top left, hsl(var(--primary) / 0.08), transparent 35%),
-      linear-gradient(180deg, hsl(var(--background)), hsl(var(--muted) / 0.4));
+    background-color: hsl(var(--background));
     min-height: 100vh;
   }
 
