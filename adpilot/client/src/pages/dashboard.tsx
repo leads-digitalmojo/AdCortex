@@ -399,15 +399,15 @@ function KpiCard({
   const hideTrend = activeCadence === "daily";
 
   return (
-    <Card className="relative overflow-hidden border-border/70 shadow-lg before:absolute before:inset-x-0 before:top-0 before:h-1 before:rounded-t-[10px] before:bg-primary/80">
-      <CardContent className="p-3.5">
+    <Card className="relative overflow-hidden border-[1.5px] border-foreground/85 shadow-none transition-shadow hover:shadow-md">
+      <CardContent className="p-4">
         {/* Title row */}
         <div className="flex items-center justify-between gap-1 mb-2">
-          <h3 className="text-xs font-bold uppercase tracking-[0.12em] text-muted-foreground leading-none truncate pr-1">
+          <h3 className="text-xs font-bold uppercase tracking-[0.12em] text-foreground/70 leading-none truncate pr-1">
             {title}
           </h3>
-          <div className="size-7 rounded-lg bg-primary/15 flex items-center justify-center border border-primary/20 shrink-0">
-            <Icon className="size-4 text-primary drop-shadow-sm" />
+          <div className="size-7 rounded-lg bg-primary flex items-center justify-center shrink-0">
+            <Icon className="size-4 text-primary-foreground" />
           </div>
         </div>
         <div
