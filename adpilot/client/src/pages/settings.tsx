@@ -84,7 +84,6 @@ export default function SettingsPage() {
     activePlatform,
     analysisData: data,
     isLoadingAnalysis,
-    apiBase,
   } = useClient();
   const { user, isAdmin } = useAuth();
   const { toast } = useToast();
@@ -220,8 +219,12 @@ export default function SettingsPage() {
       if (r.ok) {
         const d = await r.json();
         setAiConfig(d);
+      } else {
+        toast({ title: "Couldn't load AI config", description: `Server returned ${r.status}. Try refreshing the page.`, variant: "destructive" });
       }
-    } catch {}
+    } catch (err: any) {
+      toast({ title: "Couldn't load AI config", description: err.message || "Network error", variant: "destructive" });
+    }
   }
 
   async function handleSaveAiConfig() {
@@ -238,21 +241,30 @@ export default function SettingsPage() {
     }
   }
 
-  // Fetch audit log for exports
+  // Fetch audit log for exports (admin-only; global log filtered to this client)
   useEffect(() => {
-    apiRequest("GET", `${apiBase}/audit-log`)
+    if (!isAdmin || !activeClientId) return;
+    const endpoint = activePlatform === "google" ? "/api/google-audit-log" : "/api/audit-log";
+    apiRequest("GET", `${endpoint}?clientId=${encodeURIComponent(activeClientId)}&limit=500`)
       .then((r) => r.json())
-      .then((d) => setAuditLog(d.entries || d || []))
-      .catch(() => {});
-  }, [apiBase]);
+      .then((d) => setAuditLog(Array.isArray(d) ? d : d.entries || []))
+      .catch(() => setAuditLog([]));
+  }, [isAdmin, activeClientId, activePlatform]);
 
-  // Fetch learning data for exports
+  // Fetch learning data for exports (admin-only; global log filtered to this client)
   useEffect(() => {
-    apiRequest("GET", `${apiBase}/learning-data`)
+    if (!isAdmin || !activeClientId) return;
+    apiRequest("GET", "/api/execution-learning")
       .then((r) => r.json())
-      .then((d) => setLearningData(d.entries || d || []))
-      .catch(() => {});
-  }, [apiBase]);
+      .then((d: any[]) =>
+        setLearningData(
+          Array.isArray(d)
+            ? d.filter((e) => e.clientId === activeClientId && (!e.platform || e.platform === activePlatform))
+            : []
+        )
+      )
+      .catch(() => setLearningData([]));
+  }, [isAdmin, activeClientId, activePlatform]);
 
   async function loadAccessUsers() {
     if (!isAdmin) return;

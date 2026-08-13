@@ -38,6 +38,23 @@ export function useLiveUpdates() {
         invalidateAnalysis();
       });
 
+      es.addEventListener("available-funds-refreshed", () => {
+        console.log("[SSE] Available funds refreshed - invalidating available-funds queries");
+        queryClient.invalidateQueries({
+          predicate: (query) =>
+            Array.isArray(query.queryKey) && query.queryKey.includes("available-funds"),
+        });
+      });
+
+      es.addEventListener("sync-state-changed", (e) => {
+        invalidateSyncState();
+        try {
+          const { state } = JSON.parse((e as MessageEvent).data || "{}");
+          // A finished platform sync means fresh analysis JSON on disk.
+          if (state?.sync_status === "success") invalidateAnalysis();
+        } catch { /* invalidating sync-state is enough */ }
+      });
+
       es.addEventListener("agent-run-started", () => {
         invalidateSyncState();
         console.log("[SSE] Agent run started");

@@ -252,16 +252,27 @@ def score_google_campaign_module(data, target_cpl):
     """
     w = {"cpl": 30, "cvr": 22, "cpc": 15, "qs": 13, "ctr": 10, "is": 5, "rsa": 5}
     breakdown = {}
-    
+    actual = {}
+    target = {}
+    unit = {"cpl": "currency", "cvr": "percent", "cpc": "currency", "qs": "number",
+            "ctr": "percent", "is": "percent", "rsa": "number"}
+
     breakdown["cpl"], _ = score_staged_cost(data.get("cpl", 0), target_cpl, 100)
+    actual["cpl"], target["cpl"] = data.get("cpl", 0), target_cpl
+
     breakdown["cvr"], _ = score_linear(data.get("cvr", 0), 5.0, 100, False) # Search Target 5%
+    actual["cvr"], target["cvr"] = data.get("cvr", 0), 5.0
+
     breakdown["cpc"], _ = score_staged_cost(data.get("avg_cpc", 0), 30, 100)
-    
+    actual["cpc"], target["cpc"] = data.get("avg_cpc", 0), 30
+
     qs_raw = data.get("quality_score", 5)
     breakdown["qs"] = round(qs_raw / 10 * 100, 2)
-    
+    actual["qs"], target["qs"] = qs_raw, 10
+
     breakdown["ctr"], _ = score_linear(data.get("ctr", 0), 2.0, 100, False)
-    
+    actual["ctr"], target["ctr"] = data.get("ctr", 0), 2.0
+
     # Impression Share
     ctype = data.get("campaign_type", "location")
     is_targets = {"branded": 85, "location": 60, "generic": 50, "competitor": 40}
@@ -272,11 +283,19 @@ def score_google_campaign_module(data, target_cpl):
             break
     is_target = is_targets[found_type]
     breakdown["is"] = round(score_impression_share(data.get("impression_share", 0), is_target), 2)
-    
+    actual["is"], target["is"] = data.get("impression_share", 0), is_target
+
     breakdown["rsa"] = round(data.get("rsa_count", 0) / 3 * 100, 2)
-    
+    actual["rsa"], target["rsa"] = data.get("rsa_count", 0), 3
+
     total_score = sum((breakdown[k] * w[k] / 100) for k in w)
-    detailed_breakdown = {k: {"score": breakdown[k], "weight": w[k], "contribution": round(breakdown[k] * w[k] / 100, 2)} for k in w}
+    detailed_breakdown = {
+        k: {
+            "score": breakdown[k], "weight": w[k],
+            "contribution": round(breakdown[k] * w[k] / 100, 2),
+            "actual": actual[k], "target": target[k], "unit": unit[k],
+        } for k in w
+    }
     return {"score": round(max(0, min(100, total_score)), 1), "breakdown": breakdown, "detailed_breakdown": detailed_breakdown}
 
 def score_google_adgroup_module(data, target_cpl):
@@ -285,20 +304,41 @@ def score_google_adgroup_module(data, target_cpl):
     """
     w = {"cpl": 30, "cvr": 25, "ctr": 15, "qs": 15, "is": 10, "cpc": 5}
     breakdown = {}
-    
+    actual = {}
+    target = {}
+    unit = {"cpl": "currency", "cvr": "percent", "ctr": "percent", "qs": "number",
+            "is": "percent", "cpc": "currency"}
+
     breakdown["cpl"], _ = score_staged_cost(data.get("cpl", 0), target_cpl, 100)
+    actual["cpl"], target["cpl"] = data.get("cpl", 0), target_cpl
+
     breakdown["cvr"], _ = score_linear(data.get("cvr", 0), 5.0, 100, False)
+    actual["cvr"], target["cvr"] = data.get("cvr", 0), 5.0
+
     breakdown["ctr"], _ = score_linear(data.get("ctr", 0), 2.0, 100, False)
-    breakdown["qs"] = round(data.get("quality_score", 5) / 10 * 100, 2)
-    
+    actual["ctr"], target["ctr"] = data.get("ctr", 0), 2.0
+
+    qs_raw = data.get("quality_score", 5)
+    breakdown["qs"] = round(qs_raw / 10 * 100, 2)
+    actual["qs"], target["qs"] = qs_raw, 10
+
     ctype = data.get("campaign_type", "location")
     is_targets = {"branded": 85, "location": 60, "generic": 50, "competitor": 40}
     is_target = is_targets.get(ctype.lower(), 60)
     breakdown["is"] = round(score_impression_share(data.get("impression_share", 0), is_target), 2)
+    actual["is"], target["is"] = data.get("impression_share", 0), is_target
+
     breakdown["cpc"], _ = score_linear(data.get("avg_cpc", 0), 30, 100, True)
-    
+    actual["cpc"], target["cpc"] = data.get("avg_cpc", 0), 30
+
     total_score = sum((breakdown[k] * w[k] / 100) for k in w)
-    detailed_breakdown = {k: {"score": breakdown[k], "weight": w[k], "contribution": round(breakdown[k] * w[k] / 100, 2)} for k in w}
+    detailed_breakdown = {
+        k: {
+            "score": breakdown[k], "weight": w[k],
+            "contribution": round(breakdown[k] * w[k] / 100, 2),
+            "actual": actual[k], "target": target[k], "unit": unit[k],
+        } for k in w
+    }
     return {"score": round(max(0, min(100, total_score)), 1), "breakdown": breakdown, "detailed_breakdown": detailed_breakdown}
 
 def score_google_dg_module(data, target_cpl):
@@ -307,16 +347,37 @@ def score_google_dg_module(data, target_cpl):
     """
     w = {"cpl": 30, "cpm": 20, "cvr": 15, "ctr": 15, "tsr": 10, "freq": 10}
     breakdown = {}
-    
+    actual = {}
+    target = {}
+    unit = {"cpl": "currency", "cpm": "currency", "cvr": "percent", "ctr": "percent",
+            "tsr": "percent", "freq": "number"}
+
     breakdown["cpl"], _ = score_staged_cost(data.get("cpl", 0), target_cpl, 100)
+    actual["cpl"], target["cpl"] = data.get("cpl", 0), target_cpl
+
     breakdown["cpm"], _ = score_staged_cost(data.get("avg_cpm", 0), 120, 100)
+    actual["cpm"], target["cpm"] = data.get("avg_cpm", 0), 120
+
     breakdown["cvr"], _ = score_linear(data.get("cvr", 0), 3.0, 100, False) # DG target 3%
+    actual["cvr"], target["cvr"] = data.get("cvr", 0), 3.0
+
     breakdown["ctr"], _ = score_linear(data.get("ctr", 0), 0.8, 100, False)
+    actual["ctr"], target["ctr"] = data.get("ctr", 0), 0.8
+
     breakdown["tsr"], _ = score_linear(data.get("tsr", 0), 3.5, 100, False)
+    actual["tsr"], target["tsr"] = data.get("tsr", 0), 3.5
+
     breakdown["freq"], _ = score_linear(data.get("frequency", 0), 4.0, 100, True) # DG cap 4
-    
+    actual["freq"], target["freq"] = data.get("frequency", 0), 4.0
+
     total_score = sum((breakdown[k] * w[k] / 100) for k in w)
-    detailed_breakdown = {k: {"score": breakdown[k], "weight": w[k], "contribution": round(breakdown[k] * w[k] / 100, 2)} for k in w}
+    detailed_breakdown = {
+        k: {
+            "score": breakdown[k], "weight": w[k],
+            "contribution": round(breakdown[k] * w[k] / 100, 2),
+            "actual": actual[k], "target": target[k], "unit": unit[k],
+        } for k in w
+    }
     return {"score": round(max(0, min(100, total_score)), 1), "breakdown": breakdown, "detailed_breakdown": detailed_breakdown}
 
 def score_google_rsa_module(data, target_cpl):
@@ -325,21 +386,38 @@ def score_google_rsa_module(data, target_cpl):
     """
     w = {"cpl": 35, "ctr": 25, "cvr": 20, "ad_strength": 10, "expected_ctr": 10}
     breakdown = {}
-    
+    actual = {}
+    target = {}
+    unit = {"cpl": "currency", "ctr": "percent", "cvr": "percent",
+            "ad_strength": "label", "expected_ctr": "label"}
+
     breakdown["cpl"], _ = score_staged_cost(data.get("cpl", 0), target_cpl, 100)
+    actual["cpl"], target["cpl"] = data.get("cpl", 0), target_cpl
+
     breakdown["ctr"], _ = score_linear(data.get("ctr", 0), 2.0, 100, False)
+    actual["ctr"], target["ctr"] = data.get("ctr", 0), 2.0
+
     breakdown["cvr"], _ = score_linear(data.get("cvr", 0), 5.0, 100, False)
-    
+    actual["cvr"], target["cvr"] = data.get("cvr", 0), 5.0
+
     strength_map = {"EXCELLENT": 1.0, "GOOD": 0.8, "AVERAGE": 0.5, "POOR": 0.2, "LOW": 0.1, "UNSPECIFIED": 0.5}
     strength = data.get("ad_strength", "AVERAGE").upper()
     breakdown["ad_strength"] = round(strength_map.get(strength, 0.5) * 100, 2)
-    
+    actual["ad_strength"], target["ad_strength"] = strength, "EXCELLENT"
+
     exp_ctr_map = {"ABOVE_AVERAGE": 1.0, "AVERAGE": 0.6, "BELOW_AVERAGE": 0.2, "UNSPECIFIED": 0.5}
     exp_ctr = data.get("expected_ctr", "AVERAGE").upper()
     breakdown["expected_ctr"] = round(exp_ctr_map.get(exp_ctr, 0.5) * 100, 2)
-    
+    actual["expected_ctr"], target["expected_ctr"] = exp_ctr, "ABOVE_AVERAGE"
+
     total_score = sum((breakdown[k] * w[k] / 100) for k in w)
-    detailed_breakdown = {k: {"score": breakdown[k], "weight": w[k], "contribution": round(breakdown[k] * w[k] / 100, 2)} for k in w}
+    detailed_breakdown = {
+        k: {
+            "score": breakdown[k], "weight": w[k],
+            "contribution": round(breakdown[k] * w[k] / 100, 2),
+            "actual": actual[k], "target": target[k], "unit": unit[k],
+        } for k in w
+    }
     return {"score": round(max(0, min(100, total_score)), 1), "breakdown": breakdown, "detailed_breakdown": detailed_breakdown}
 
 def score_google_creative_module(data, target_cpl):
@@ -347,24 +425,44 @@ def score_google_creative_module(data, target_cpl):
     is_static = not is_video # Simplified
     breakdown = {}
     
+    actual = {}
+    target = {}
+    unit = {"cpl": "currency", "cpm": "currency", "ctr": "percent",
+            "tsr": "percent", "vhr": "percent", "cpc": "currency"}
+
     if is_video:
         # Google Video: CPL (35), CPM (20), CTR (15), TSR (15), VHR (15)
         w = {"cpl": 35, "cpm": 20, "ctr": 15, "tsr": 15, "vhr": 15}
         breakdown["cpl"], _ = score_linear(data.get("cpl", 0), target_cpl, 100, True)
+        actual["cpl"], target["cpl"] = data.get("cpl", 0), target_cpl
         breakdown["cpm"], _ = score_linear(data.get("avg_cpm", 0), 120, 100, True)
+        actual["cpm"], target["cpm"] = data.get("avg_cpm", 0), 120
         breakdown["ctr"], _ = score_linear(data.get("ctr", 0), 0.8, 100, False)
+        actual["ctr"], target["ctr"] = data.get("ctr", 0), 0.8
         breakdown["tsr"], _ = score_linear(data.get("tsr", 0), 3.5, 100, False)
+        actual["tsr"], target["tsr"] = data.get("tsr", 0), 3.5
         breakdown["vhr"], _ = score_linear(data.get("vhr", 0), 30, 100, False)
+        actual["vhr"], target["vhr"] = data.get("vhr", 0), 30
     else:
         # Google Static: CPL (45), CPM (25), CTR (20), CPC (10)
         w = {"cpl": 45, "cpm": 25, "ctr": 20, "cpc": 10}
         breakdown["cpl"], _ = score_linear(data.get("cpl", 0), target_cpl, 100, True)
+        actual["cpl"], target["cpl"] = data.get("cpl", 0), target_cpl
         breakdown["cpm"], _ = score_linear(data.get("avg_cpm", 0), 80, 100, True)
+        actual["cpm"], target["cpm"] = data.get("avg_cpm", 0), 80
         breakdown["ctr"], _ = score_linear(data.get("ctr", 0), 0.6, 100, False)
+        actual["ctr"], target["ctr"] = data.get("ctr", 0), 0.6
         breakdown["cpc"], _ = score_linear(data.get("avg_cpc", 0), 20, 100, True)
-    
+        actual["cpc"], target["cpc"] = data.get("avg_cpc", 0), 20
+
     total_score = sum((breakdown[k] * w[k] / 100) for k in w)
-    detailed_breakdown = {k: {"score": breakdown[k], "weight": w[k], "contribution": round(breakdown[k] * w[k] / 100, 2)} for k in w}
+    detailed_breakdown = {
+        k: {
+            "score": breakdown[k], "weight": w[k],
+            "contribution": round(breakdown[k] * w[k] / 100, 2),
+            "actual": actual[k], "target": target[k], "unit": unit[k],
+        } for k in w
+    }
     return {"score": round(max(0, min(100, total_score)), 1), "breakdown": breakdown, "detailed_breakdown": detailed_breakdown}
 
 # --- Quality Score Page Scorer ---

@@ -24,7 +24,8 @@ const AUDIT_LOG_PATH = path.join(DATA_BASE, "google_execution_audit_log.json");
 const CREDS_FILE = path.resolve(import.meta.dirname, "../../ads_agent/google_ads_credentials.json");
 const TOKEN_CACHE_FILE = path.resolve(import.meta.dirname, "../../ads_agent/.google_ads_token_cache.json");
 
-const API_VERSION = "v21";
+// v21 sunset on 2026-08-05 — bump this whenever Google retires the current version.
+const API_VERSION = "v25";
 const BASE_URL = `https://googleads.googleapis.com/${API_VERSION}`;
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 
@@ -32,8 +33,12 @@ function normalizeGoogleAccountId(value?: string | null): string {
   return String(value ?? "").replace(/\D/g, "");
 }
 
+// Legacy single-tenant fallback, used only when a caller doesn't pass explicit
+// per-client credentials/customerId (kept for the unused getGoogleEntityStatus
+// helper below). Every action-executing path in routes.ts now passes the
+// client's own credentials explicitly — see executeGoogleAction.
 function getGoogleCustomerId(): string {
-  return normalizeGoogleAccountId(process.env.GOOGLE_CUSTOMER_ID) || "3120813693";
+  return normalizeGoogleAccountId(process.env.GOOGLE_CUSTOMER_ID);
 }
 
 function getGoogleLoginCustomerId(): string {
@@ -62,6 +67,14 @@ export interface GoogleExecutionRequest {
   entityId: string;
   entityName: string;
   entityType: "campaign" | "ad_group" | "ad";
+  clientId?: string;          // which dashboard client this action belongs to
+  // The Google Ads customer this action targets and the credentials to authenticate
+  // with. Required in practice — every routes.ts call site resolves these from the
+  // client's own stored credentials before calling executeGoogleAction, so an action
+  // never silently runs against whichever account happens to be in the shared legacy
+  // config. Optional only so this type doesn't force a breaking change on every field.
+  customerId?: string;
+  credentials?: GoogleAdsClientCredentials;
   params?: {
     budgetAmount?: number;    // daily budget in rupees
     currentBudget?: number;   // fallback current daily budget in rupees
@@ -82,6 +95,7 @@ export interface GoogleExecutionResult {
   entityId: string;
   entityName: string;
   entityType: string;
+  clientId?: string;
   previousValue?: string;
   newValue?: string;
   googleApiResponse?: any;
@@ -104,6 +118,27 @@ interface Credentials {
   refresh_token: string;
   developer_token: string;
   login_customer_id?: string;
+}
+
+// Per-client Google Ads credentials, as stored in the app's client credential store.
+// Passed explicitly into executeGoogleAction so actions always run against the
+// correct client's ad account rather than a single shared global config.
+export interface GoogleAdsClientCredentials {
+  clientId: string;
+  clientSecret: string;
+  refreshToken: string;
+  developerToken: string;
+  mccId?: string;
+}
+
+function toInternalCredentials(creds: GoogleAdsClientCredentials): Credentials {
+  return {
+    client_id: creds.clientId,
+    client_secret: creds.clientSecret,
+    refresh_token: creds.refreshToken,
+    developer_token: creds.developerToken,
+    login_customer_id: normalizeGoogleAccountId(creds.mccId),
+  };
 }
 
 interface TokenCache {
@@ -217,8 +252,7 @@ async function getAccessToken(creds: Credentials): Promise<string> {
 /**
  * Build the standard header set required by every Google Ads REST call.
  */
-async function buildHeaders(customerId: string = getGoogleCustomerId()): Promise<Record<string, string>> {
-  const creds = loadCredentials();
+async function buildHeaders(customerId: string, creds: Credentials): Promise<Record<string, string>> {
   const token = await getAccessToken(creds);
   const headers: Record<string, string> = {
     Authorization: `Bearer ${token}`,
@@ -258,11 +292,12 @@ function parseGoogleAdsError(body: any): string {
 // ──── Mutate: Campaigns ──────────────────────────────────────────
 
 async function mutateCampaignStatus(
+  customerId: string,
+  creds: Credentials,
   campaignId: string,
   status: "ENABLED" | "PAUSED"
 ): Promise<{ success: boolean; data?: any; error?: string }> {
-  const customerId = getGoogleCustomerId();
-  const headers = await buildHeaders(customerId);
+  const headers = await buildHeaders(customerId, creds);
   const resourceName = `customers/${customerId}/campaigns/${campaignId}`;
 
   const resp = await fetch(
@@ -294,11 +329,12 @@ async function mutateCampaignStatus(
 // ──── Mutate: Ad Groups ──────────────────────────────────────────
 
 async function mutateAdGroupStatus(
+  customerId: string,
+  creds: Credentials,
   adGroupId: string,
   status: "ENABLED" | "PAUSED"
 ): Promise<{ success: boolean; data?: any; error?: string }> {
-  const customerId = getGoogleCustomerId();
-  const headers = await buildHeaders(customerId);
+  const headers = await buildHeaders(customerId, creds);
   const resourceName = `customers/${customerId}/adGroups/${adGroupId}`;
 
   const resp = await fetch(
@@ -330,12 +366,13 @@ async function mutateAdGroupStatus(
 // ──── Mutate: Ads (adGroupAds) ───────────────────────────────────
 
 async function mutateAdStatus(
+  customerId: string,
+  creds: Credentials,
   adGroupAdId: string,
   status: "ENABLED" | "PAUSED"
 ): Promise<{ success: boolean; data?: any; error?: string }> {
   // adGroupAdId is expected as "adGroupId~adId"
-  const customerId = getGoogleCustomerId();
-  const headers = await buildHeaders(customerId);
+  const headers = await buildHeaders(customerId, creds);
   const resourceName = `customers/${customerId}/adGroupAds/${adGroupAdId}`;
 
   const resp = await fetch(
@@ -367,11 +404,12 @@ async function mutateAdStatus(
 // ──── Mutate: CPC Bid on Ad Group ────────────────────────────────
 
 async function mutateAdGroupCpcBid(
+  customerId: string,
+  creds: Credentials,
   adGroupId: string,
   cpcBidMicros: number
 ): Promise<{ success: boolean; data?: any; error?: string }> {
-  const customerId = getGoogleCustomerId();
-  const headers = await buildHeaders(customerId);
+  const headers = await buildHeaders(customerId, creds);
   const resourceName = `customers/${customerId}/adGroups/${adGroupId}`;
 
   const resp = await fetch(
@@ -403,11 +441,12 @@ async function mutateAdGroupCpcBid(
 // ──── Mutate: Campaign Budget ────────────────────────────────────
 
 async function mutateCampaignBudget(
+  customerId: string,
+  creds: Credentials,
   budgetResourceName: string,
   newAmountMicros: number
 ): Promise<{ success: boolean; data?: any; error?: string }> {
-  const customerId = getGoogleCustomerId();
-  const headers = await buildHeaders(customerId);
+  const headers = await buildHeaders(customerId, creds);
 
   const resp = await fetch(
     `${BASE_URL}/customers/${customerId}/campaignBudgets:mutate`,
@@ -437,9 +476,8 @@ async function mutateCampaignBudget(
 
 // ──── GAQL Query ─────────────────────────────────────────────────
 
-async function gaqlSearch(query: string): Promise<any[]> {
-  const customerId = getGoogleCustomerId();
-  const headers = await buildHeaders(customerId);
+async function gaqlSearch(customerId: string, creds: Credentials, query: string): Promise<any[]> {
+  const headers = await buildHeaders(customerId, creds);
   const allResults: any[] = [];
   let nextPageToken: string | undefined;
 
@@ -471,6 +509,8 @@ async function gaqlSearch(query: string): Promise<any[]> {
 // ──── Look up budget resource name for a campaign ────────────────
 
 async function getCampaignBudgetInfo(
+  customerId: string,
+  creds: Credentials,
   campaignId: string
 ): Promise<{ budgetResourceName: string; currentMicros: number }> {
   const query = `
@@ -479,7 +519,7 @@ async function getCampaignBudgetInfo(
     WHERE campaign.id = ${campaignId}
     LIMIT 1
   `;
-  const rows = await gaqlSearch(query);
+  const rows = await gaqlSearch(customerId, creds, query);
   if (!rows.length) {
     throw new Error(`Campaign ${campaignId} not found`);
   }
@@ -526,17 +566,19 @@ export function appendGoogleAuditEntry(result: GoogleExecutionResult): AuditEntr
 // ─── Status dispatch helper ──────────────────────────────────────
 
 async function setEntityStatus(
+  customerId: string,
+  creds: Credentials,
   entityId: string,
   entityType: string,
   status: "ENABLED" | "PAUSED"
 ): Promise<{ success: boolean; data?: any; error?: string }> {
   switch (entityType) {
     case "campaign":
-      return mutateCampaignStatus(entityId, status);
+      return mutateCampaignStatus(customerId, creds, entityId, status);
     case "ad_group":
-      return mutateAdGroupStatus(entityId, status);
+      return mutateAdGroupStatus(customerId, creds, entityId, status);
     case "ad":
-      return mutateAdStatus(entityId, status);
+      return mutateAdStatus(customerId, creds, entityId, status);
     default:
       return { success: false, error: `Unsupported entity type: ${entityType}` };
   }
@@ -551,6 +593,7 @@ export async function executeGoogleAction(req: GoogleExecutionRequest): Promise<
     entityId: req.entityId,
     entityName: req.entityName,
     entityType: req.entityType,
+    clientId: req.clientId,
     timestamp,
     requestedBy: req.requestedBy,
     requestedByName: req.requestedByName,
@@ -559,13 +602,35 @@ export async function executeGoogleAction(req: GoogleExecutionRequest): Promise<
     platform: "google" as const,
   };
 
+  // Resolve which ad account and credentials this action runs against. Callers are
+  // expected to pass these explicitly (routes.ts resolves them from the client's own
+  // stored credentials) — falling back to the legacy shared config here would risk
+  // silently executing against the wrong client's Google Ads account.
+  let customerId: string;
+  let creds: Credentials;
+  try {
+    customerId = req.customerId ? normalizeGoogleAccountId(req.customerId) : getGoogleCustomerId();
+    if (!customerId) {
+      throw new Error("No Google Ads customer ID provided for this action");
+    }
+    creds = req.credentials ? toInternalCredentials(req.credentials) : loadCredentials();
+  } catch (err: any) {
+    const execResult: GoogleExecutionResult = {
+      ...baseResult,
+      success: false,
+      error: err.message || "Missing Google Ads credentials for this action",
+    };
+    logExecution(execResult);
+    return execResult;
+  }
+
   try {
     switch (req.action) {
       // ── Pause entities ─────────────────────────────────────
       case "PAUSE_CAMPAIGN":
       case "PAUSE_AD_GROUP":
       case "PAUSE_AD": {
-        const result = await setEntityStatus(req.entityId, req.entityType, "PAUSED");
+        const result = await setEntityStatus(customerId, creds, req.entityId, req.entityType, "PAUSED");
         const execResult: GoogleExecutionResult = {
           ...baseResult,
           success: result.success,
@@ -582,7 +647,7 @@ export async function executeGoogleAction(req: GoogleExecutionRequest): Promise<
       case "ENABLE_CAMPAIGN":
       case "ENABLE_AD_GROUP":
       case "ENABLE_AD": {
-        const result = await setEntityStatus(req.entityId, req.entityType, "ENABLED");
+        const result = await setEntityStatus(customerId, creds, req.entityId, req.entityType, "ENABLED");
         const execResult: GoogleExecutionResult = {
           ...baseResult,
           success: result.success,
@@ -609,11 +674,11 @@ export async function executeGoogleAction(req: GoogleExecutionRequest): Promise<
         }
 
         // Look up the budget resource name for this campaign
-        const budgetInfo = await getCampaignBudgetInfo(req.entityId);
+        const budgetInfo = await getCampaignBudgetInfo(customerId, creds, req.entityId);
         const previousMicros = budgetInfo.currentMicros;
         const newMicros = budgetRupees * 1_000_000;
 
-        const result = await mutateCampaignBudget(budgetInfo.budgetResourceName, newMicros);
+        const result = await mutateCampaignBudget(customerId, creds, budgetInfo.budgetResourceName, newMicros);
         const execResult: GoogleExecutionResult = {
           ...baseResult,
           success: result.success,
@@ -637,7 +702,7 @@ export async function executeGoogleAction(req: GoogleExecutionRequest): Promise<
         let budgetResourceName: string;
 
         try {
-          const budgetInfo = await getCampaignBudgetInfo(req.entityId);
+          const budgetInfo = await getCampaignBudgetInfo(customerId, creds, req.entityId);
           currentMicros = budgetInfo.currentMicros;
           budgetResourceName = budgetInfo.budgetResourceName;
         } catch (err) {
@@ -645,7 +710,7 @@ export async function executeGoogleAction(req: GoogleExecutionRequest): Promise<
             console.log(`[google-execution] GAQL budget fetch failed for ${req.entityId}, using fallback: ₹${req.params.currentBudget}`);
             currentMicros = req.params.currentBudget * 1_000_000;
             // Best guess for resource name as fallback if we don't have it
-            budgetResourceName = `customers/${getGoogleCustomerId()}/campaignBudgets/${req.entityId}`;
+            budgetResourceName = `customers/${customerId}/campaignBudgets/${req.entityId}`;
           } else {
             throw err;
           }
@@ -664,7 +729,7 @@ export async function executeGoogleAction(req: GoogleExecutionRequest): Promise<
           return execResult;
         }
 
-        const result = await mutateCampaignBudget(budgetResourceName, newMicros);
+        const result = await mutateCampaignBudget(customerId, creds, budgetResourceName, newMicros);
         const previousRupees = (currentMicros / 1_000_000).toFixed(2);
         const newRupees = (newMicros / 1_000_000).toFixed(2);
 
@@ -694,7 +759,7 @@ export async function executeGoogleAction(req: GoogleExecutionRequest): Promise<
           logExecution(execResult);
           return execResult;
         }
-        const result = await mutateAdGroupCpcBid(req.entityId, cpcMicros);
+        const result = await mutateAdGroupCpcBid(customerId, creds, req.entityId, cpcMicros);
         const execResult: GoogleExecutionResult = {
           ...baseResult,
           success: result.success,
@@ -751,9 +816,10 @@ export async function executeGoogleBatch(
 /**
  * Get Google execution audit log (most recent first).
  */
-export function getGoogleAuditLog(limit = 50): AuditEntry[] {
+export function getGoogleAuditLog(limit = 50, clientId?: string): AuditEntry[] {
   const log = readAuditLog();
-  return log.slice(0, limit);
+  const filtered = clientId ? log.filter((e) => e.clientId === clientId) : log;
+  return filtered.slice(0, limit);
 }
 
 // ─── Entity Status Query ─────────────────────────────────────────
@@ -766,7 +832,9 @@ export function getGoogleAuditLog(limit = 50): AuditEntry[] {
  */
 export async function getGoogleEntityStatus(
   entityId: string,
-  entityType: "campaign" | "ad_group" | "ad"
+  entityType: "campaign" | "ad_group" | "ad",
+  customerId: string = getGoogleCustomerId(),
+  credentials?: GoogleAdsClientCredentials
 ): Promise<{
   entityId: string;
   entityType: string;
@@ -808,7 +876,8 @@ export async function getGoogleEntityStatus(
         return { entityId, entityType, error: `Unsupported entity type: ${entityType}` };
     }
 
-    const rows = await gaqlSearch(query);
+    const creds = credentials ? toInternalCredentials(credentials) : loadCredentials();
+    const rows = await gaqlSearch(customerId, creds, query);
     if (!rows.length) {
       return { entityId, entityType, error: `Entity not found` };
     }

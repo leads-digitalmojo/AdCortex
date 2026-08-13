@@ -1392,6 +1392,7 @@ def audit_campaigns(campaign_insights, campaigns_list, active_adsets, cost_stack
         cpl = get_cost_per_action(c.get("cost_per_action_type"), LEAD_ACTION_TYPES)
         if cpl == 0 and leads > 0:
             cpl = spend / leads
+        cvr = (leads / clicks * 100) if clicks > 0 else 0
 
         bi = budget_lookup.get(cid, {})
         daily_budget = bi.get("daily_budget", 0)
@@ -1427,7 +1428,7 @@ def audit_campaigns(campaign_insights, campaigns_list, active_adsets, cost_stack
         cpl_target = MONTHLY_TARGETS["meta"]["cpl"]
         campaign_score_data = {
             "leads": leads, "cpl": cpl, "impressions": impressions, "spend": spend,
-            "cpm": cpm, "ctr": ctr, "frequency": frequency, "layer": layer,
+            "cpm": cpm, "ctr": ctr, "cvr": cvr, "frequency": frequency, "layer": layer,
             "daily_budget": daily_budget, "budget_utilization_pct": budget_util,
         }
         scoring = score_meta_campaign(campaign_score_data, cpl_target)
@@ -1440,7 +1441,7 @@ def audit_campaigns(campaign_insights, campaigns_list, active_adsets, cost_stack
             "classification": scoring["classification"],
             "spend": spend, "impressions": impressions, "clicks": clicks,
             "ctr": ctr, "cpc": cpc, "cpm": cpm, "frequency": frequency, "reach": reach,
-            "leads": leads, "cpl": cpl,
+            "leads": leads, "cpl": cpl, "cvr": round(cvr, 2),
             "daily_budget": daily_budget, "budget_remaining": budget_remaining,
             "budget_utilization_pct": budget_util,
             "is_lead_campaign": is_lead, "is_awareness": is_awareness,
@@ -1493,6 +1494,7 @@ def analyze_adsets(adset_insights, active_adsets, all_adsets, cost_stack):
         reach = si(a.get("reach"))
         leads = get_action_value(a.get("actions"), LEAD_ACTION_TYPES)
         cpl = spend / leads if leads > 0 else 0
+        cvr = (leads / clicks * 100) if clicks > 0 else 0
 
         meta = adset_meta.get(asid, {})
         daily_budget = meta.get("daily_budget", 0)
@@ -1522,7 +1524,7 @@ def analyze_adsets(adset_insights, active_adsets, all_adsets, cost_stack):
         cpl_target = MONTHLY_TARGETS["meta"]["cpl"]
         score_data = {
             "leads": leads, "cpl": cpl, "impressions": impressions, "spend": spend,
-            "cpm": cpm, "ctr": ctr, "frequency": frequency, "layer": layer,
+            "cpm": cpm, "ctr": ctr, "cvr": cvr, "frequency": frequency, "layer": layer,
             "daily_budget": daily_budget, "budget_utilization_pct": budget_util,
         }
         scoring = score_meta_campaign(score_data, cpl_target)
@@ -1574,7 +1576,7 @@ def analyze_adsets(adset_insights, active_adsets, all_adsets, cost_stack):
             "campaign_id": cid, "campaign_name": campaign_name, "layer": layer,
             "spend": spend, "impressions": impressions, "clicks": clicks,
             "ctr": ctr, "cpc": cpc, "cpm": cpm, "frequency": frequency, "reach": reach,
-            "leads": leads, "cpl": cpl,
+            "leads": leads, "cpl": cpl, "cvr": round(cvr, 2),
             "daily_budget": daily_budget, "budget_utilization_pct": budget_util,
             "delivery_status": delivery_status, "learning_status": learning_status,
             "health_score": scoring["total_score"], "classification": scoring["classification"],

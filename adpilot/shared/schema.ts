@@ -175,6 +175,7 @@ export interface CampaignAudit {
   search_impression_share?: number;
   search_rank_lost_is?: number;
   search_budget_lost_is?: number;
+  quality_score?: number | null;
   phone_impressions?: number;
   phone_calls?: number;
   ptr?: number;

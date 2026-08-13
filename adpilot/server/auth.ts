@@ -369,7 +369,7 @@ export function requireRole(allowedRoles: UserRole[]) {
  * Admin: Full access.
  * Member: Only clients they created.
  */
-export async function enforceOwnership(clientId: string, user: SafeUser) {
+export async function enforceOwnership(clientId: string, user: Pick<SafeUser, "id" | "role">) {
   if (user.role === "admin") return true;
 
   // For members, check if they are the creator of the client

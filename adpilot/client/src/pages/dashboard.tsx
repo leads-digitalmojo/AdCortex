@@ -27,6 +27,7 @@ import {
 import { Link } from "wouter";
 import {
   IndianRupee,
+  Wallet,
   Users,
   Target,
   MousePointerClick,
@@ -623,6 +624,23 @@ export default function DashboardPage() {
     },
     enabled: !!activeClientId && !!activePlatform,
     staleTime: 5 * 60 * 1000,
+  });
+
+  const { data: availableFundsData } = useQuery<{
+    platform: string;
+    currency: string | null;
+    availableFunds: number | null;
+    daysRemaining: number | null;
+    source: string;
+  }>({
+    queryKey: ["/api/clients", activeClientId, activePlatform, "available-funds"],
+    queryFn: async () => {
+      const res = await apiRequest("GET", `/api/clients/${activeClientId}/${activePlatform}/available-funds`);
+      return res.json();
+    },
+    enabled: !!activeClientId && !!activePlatform,
+    staleTime: 5 * 60 * 1000,
+    retry: false,
   });
 
   const { data: newEntities } = useQuery<{
@@ -1269,19 +1287,27 @@ export default function DashboardPage() {
   const totalAdsAnalyzed: number = creativeHealth?.length || 0;
   const totalCampaignsAnalyzed: number = campaignAudit?.length || 0;
 
-  const adsWithLeads = creativeHealth.filter((a: any) => (a.leads ?? 0) > 0 && (a.spend ?? 0) > 0);
+  // Coerce to Number explicitly: the analysis API returns these as numbers today,
+  // but a malformed/string value would otherwise silently corrupt the reduce below
+  // (e.g. `0 + "1200"` string-concatenates instead of adding) rather than erroring.
+  const numField = (v: unknown): number => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  };
+
+  const adsWithLeads = creativeHealth.filter((a: any) => numField(a.leads) > 0 && numField(a.spend) > 0);
   const bestAd: any = adsWithLeads.length > 0
-    ? adsWithLeads.reduce((best: any, cur: any) => ((cur.cpl || Infinity) < (best.cpl || Infinity) ? cur : best), adsWithLeads[0])
+    ? adsWithLeads.reduce((best: any, cur: any) => ((numField(cur.cpl) || Infinity) < (numField(best.cpl) || Infinity) ? cur : best), adsWithLeads[0])
     : null;
   const worstAd: any = adsWithLeads.length > 0
-    ? adsWithLeads.reduce((worst: any, cur: any) => ((cur.cpl || 0) > (worst.cpl || 0) ? cur : worst), adsWithLeads[0])
+    ? adsWithLeads.reduce((worst: any, cur: any) => (numField(cur.cpl) > numField(worst.cpl) ? cur : worst), adsWithLeads[0])
     : null;
 
   const targetCpl: number = t_cpl_target;
-  const totalAdSpend = creativeHealth.reduce((s: number, a: any) => s + (a.spend || 0), 0);
+  const totalAdSpend = creativeHealth.reduce((s: number, a: any) => s + numField(a.spend), 0);
   const wastedSpend = creativeHealth
-    .filter((a: any) => (a.cpl || 0) > targetCpl && (a.spend || 0) > 0)
-    .reduce((s: number, a: any) => s + (a.spend || 0), 0);
+    .filter((a: any) => numField(a.cpl) > targetCpl && numField(a.spend) > 0)
+    .reduce((s: number, a: any) => s + numField(a.spend), 0);
   const budgetEfficiencyPct: number = totalAdSpend > 0 ? Math.round((wastedSpend / totalAdSpend) * 100) : 0;
 
   const proRatedBudgetThreshold = useMemo(() => {
@@ -1461,30 +1487,45 @@ export default function DashboardPage() {
               <TooltipTrigger asChild>
                 <button
                   className="px-4 py-2 text-xs font-semibold uppercase tracking-[0.08em] rounded-lg border border-black bg-black text-white hover:bg-white hover:text-black transition-colors"
-                  disabled={isTriggeringAgent}
-                  aria-disabled={isTriggeringAgent}
+                  disabled={isTriggeringAgent || !activeClientId}
+                  aria-disabled={isTriggeringAgent || !activeClientId}
                   onClick={async () => {
                     if (isTriggeringAgent) return;
+                    // Never fire without a client — an unscoped request runs the agent
+                    // for every account in the workspace.
+                    if (!activeClientId) {
+                      toast({
+                        title: "No client selected",
+                        description: "Pick a client before running the agent.",
+                        variant: "destructive",
+                      });
+                      return;
+                    }
                     setIsTriggeringAgent(true);
                     try {
-                      const res = await fetch("/api/scheduler/run-now", { method: "POST" });
-                      if (!res.ok) {
-                        let msg = `Failed to trigger agent run (HTTP ${res.status})`;
-                        try {
-                          const json = await res.json();
-                          msg = json?.message || json?.error || msg;
-                        } catch { }
-                        throw new Error(msg);
-                      }
+                      // Scoped to the client/platform on screen: this run touches only
+                      // this account, not every client in the workspace.
+                      await apiRequest("POST", "/api/scheduler/run-now", {
+                        clientId: activeClientId,
+                        platform: activePlatform,
+                      });
                       toast({
-                        title: "Agent run triggered",
-                        description: "Watch the sync status — data will refresh automatically when the run completes.",
+                        title: `Agent run triggered for ${activeClient?.name || "this client"}`,
+                        description: `Fetching fresh ${activePlatform === "google" ? "Google" : "Meta"} data — the dashboard refreshes automatically when it completes.`,
                       });
                     } catch (e: any) {
                       console.error("[Run Agent] trigger failed:", e);
+                      // apiRequest reports failures as "<status>: <body>" — unwrap the message.
+                      let description = e?.message || "Could not trigger agent run.";
+                      const bodyStart = description.indexOf("{");
+                      if (bodyStart !== -1) {
+                        try {
+                          description = JSON.parse(description.slice(bodyStart))?.error || description;
+                        } catch { /* keep raw message */ }
+                      }
                       toast({
                         title: "Run Agent failed",
-                        description: e?.message || "Could not trigger agent run.",
+                        description,
                         variant: "destructive",
                       });
                     } finally {
@@ -1497,7 +1538,7 @@ export default function DashboardPage() {
                 </button>
               </TooltipTrigger>
               <TooltipContent>
-                <p className="text-xs">Click to trigger an immediate agent run. Normally runs daily at 9 AM IST.</p>
+                <p className="text-xs">Runs the agent immediately for {activeClient?.name || "this client"} only. All accounts run daily at 9 AM IST.</p>
               </TooltipContent>
             </Tooltip>
           </div>
@@ -1704,7 +1745,7 @@ export default function DashboardPage() {
       {/* KPI Cards */}
       <section className="page-zone min-w-0" aria-labelledby="dashboard-kpis">
         <h2 id="dashboard-kpis" className="sr-only">Key performance indicators</h2>
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-6">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-7">
           <KpiCard
             title={`Spend · ${periodLabel}`}
             value={formatINR(displayAp.total_spend_30d, 0)}
@@ -1771,6 +1812,27 @@ export default function DashboardPage() {
             icon={Gauge}
             status={kpiPacingStatus}
             subtitle={proRatedBudgetThreshold > 0 ? `Target: ${formatINR(proRatedBudgetThreshold, 0)}` : "No pacing data"}
+          />
+          <KpiCard
+            title="Available Funds"
+            value={availableFundsData?.availableFunds != null ? formatINR(availableFundsData.availableFunds, 0) : "N/A"}
+            icon={Wallet}
+            subtitle={
+              availableFundsData?.availableFunds == null
+                ? "Not applicable for this account"
+                : availableFundsData.daysRemaining != null
+                  ? `~${availableFundsData.daysRemaining} days runway`
+                  : "In ad account wallet"
+            }
+            status={
+              availableFundsData?.availableFunds != null && availableFundsData.daysRemaining != null
+                ? (availableFundsData.daysRemaining <= 3
+                  ? { label: "Low Balance", variant: "destructive" }
+                  : availableFundsData.daysRemaining <= 7
+                    ? { label: "Running Low", variant: "warning" }
+                    : { label: "Healthy", variant: "success" })
+                : undefined
+            }
           />
           <KpiCard
             title="Active Alerts"

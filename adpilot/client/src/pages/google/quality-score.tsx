@@ -42,6 +42,7 @@ import {
 } from "lucide-react";
 import { formatINR, truncate } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import {
   BarChart,
   Bar,
@@ -152,20 +153,33 @@ function normalizeQualityScore(rawData: any): QualityScoreData {
 
   // Calculate Aggregates
   const total = keywords.length;
-  const avgQs = total > 0 ? keywords.reduce((s, k) => s + k.quality_score, 0) / total : 0;
+  // Prefer the backend's impression-weighted average (matches the Campaigns tab's
+  // per-campaign QS, which is also impression-weighted) over a plain per-keyword
+  // mean — otherwise this tab shows a different "average QS" than the rest of the app.
+  const totalImpressions = keywords.reduce((s, k) => s + k.impressions, 0);
+  const weightedAvgQs = totalImpressions > 0
+    ? keywords.reduce((s, k) => s + k.quality_score * k.impressions, 0) / totalImpressions
+    : (total > 0 ? keywords.reduce((s, k) => s + k.quality_score, 0) / total : 0);
+  const avgQs = typeof analysis.summary?.avg_qs === "number" ? analysis.summary.avg_qs : weightedAvgQs;
   const below4 = keywords.filter(k => k.quality_score < 4).length;
   const below6 = keywords.filter(k => k.quality_score < 6).length;
   const excellentCount = keywords.filter(k => k.quality_score >= 7).length;
   const poorCount = keywords.filter(k => k.quality_score < 5).length;
 
+  // per_campaign (list form) is the primary source; fall back to by_campaign
+  // (dict keyed by campaign name) for older cached analysis payloads.
+  const rawPerCampaign = Array.isArray(analysis.per_campaign)
+    ? analysis.per_campaign
+    : Object.entries(analysis.by_campaign || {}).map(([name, pc]: [string, any]) => ({ campaign_name: name, ...pc }));
+
   return {
     keywords,
     campaigns,
-    perCampaign: safeArray<any>(analysis.per_campaign).map(pc => ({
+    perCampaign: safeArray<any>(rawPerCampaign).map(pc => ({
       campaign_name: safeString(pc?.campaign_name),
       avg_qs: safeNumber(pc?.avg_qs),
       keyword_count: safeNumber(pc?.keyword_count),
-      below_4: safeNumber(pc?.below_4),
+      below_4: safeNumber(pc?.below_4 ?? pc?.critical_count),
       below_6: safeNumber(pc?.below_6),
     })),
     alerts: safeArray(analysis.alerts),
@@ -208,6 +222,7 @@ export default function GoogleQualityScorePage() {
   // Viewport State
   const [selectedCampaign, setSelectedCampaign] = useState(ALL_CAMPAIGNS);
   const [searchTerm, setSearchTerm] = useState("");
+  const debouncedSearchTerm = useDebouncedValue(searchTerm, 200);
   const [sortKey, setSortKey] = useState<keyof QsKeyword>("quality_score");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [openAdGroups, setOpenAdGroups] = useState<Record<string, boolean>>({});
@@ -228,8 +243,8 @@ export default function GoogleQualityScorePage() {
       if (camp) list = list.filter(k => k.campaign_name === camp.name);
     }
 
-    if (searchTerm) {
-      const q = searchTerm.toLowerCase();
+    if (debouncedSearchTerm) {
+      const q = debouncedSearchTerm.toLowerCase();
       list = list.filter(k =>
         k.keyword_text.toLowerCase().includes(q) ||
         k.ad_group_name.toLowerCase().includes(q)
@@ -246,7 +261,7 @@ export default function GoogleQualityScorePage() {
         ? String(aVal).localeCompare(String(bVal))
         : String(bVal).localeCompare(String(aVal));
     });
-  }, [data, selectedCampaign, searchTerm, sortKey, sortDir]);
+  }, [data, selectedCampaign, debouncedSearchTerm, sortKey, sortDir]);
 
   // Derived: Grouped Map
   const adGroupMap = useMemo(() => {
@@ -450,7 +465,10 @@ export default function GoogleQualityScorePage() {
           const paginated = allEntries.slice((page - 1) * pageSize, page * pageSize);
 
           return paginated.map(([name, keywords]) => {
-            const agAvg = keywords.reduce((s, k) => s + k.quality_score, 0) / keywords.length;
+            const agImpressions = keywords.reduce((s, k) => s + k.impressions, 0);
+            const agAvg = agImpressions > 0
+              ? keywords.reduce((s, k) => s + k.quality_score * k.impressions, 0) / agImpressions
+              : keywords.reduce((s, k) => s + k.quality_score, 0) / keywords.length;
             const agCritical = keywords.filter(k => k.quality_score < 4).length;
             const isOpen = openAdGroups[name] !== false;
 

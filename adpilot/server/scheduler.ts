@@ -10,6 +10,7 @@ import { storage } from "./storage";
 import { db } from "./db";
 import { clients } from "@shared/schema";
 import { eq } from "drizzle-orm";
+import { refreshAllAvailableFunds } from "./available-funds";
 
 const execFileAsync = promisify(execFile);
 
@@ -66,6 +67,26 @@ let schedulerStatus: SchedulerStatus = {
 };
 
 let platformSyncState: PlatformSyncStore = {};
+
+export type AgentPlatform = "meta" | "google";
+
+export interface AgentRunOptions {
+  clientIds?: string[];
+  platforms?: AgentPlatform[];
+}
+
+// Tracks which client/platform pairs currently have an agent process running so a
+// scoped manual sync (e.g. "sync Google for this client") can start immediately
+// instead of queuing behind an unrelated full run.
+const inFlightSyncs = new Set<string>();
+const syncKey = (clientId: string, platform: string) => `${clientId}:${platform}`;
+
+export function isPlatformSyncing(clientId: string, platform: string): boolean {
+  return inFlightSyncs.has(syncKey(clientId, platform));
+}
+
+// Number of agent runs (full or scoped) currently executing.
+let activeRuns = 0;
 
 // SSE clients for live updates with user context
 interface SSEClient {
@@ -176,7 +197,10 @@ function getLatestAnalysisTimestamp(clientId: string, platform: string): string 
   const platformDir = path.join(DATA_BASE, "clients", clientId, platform);
   const candidateFiles = fs.existsSync(platformDir)
     ? fs.readdirSync(platformDir)
-        .filter((name) => /^analysis(?:_.+)?\.json$/.test(name))
+        // analysis_last_error.json is a failure record written by the Google agent —
+        // it carries a `timestamp`, so counting it here would report a failed run as
+        // a successful fetch.
+        .filter((name) => /^analysis(?:_.+)?\.json$/.test(name) && name !== "analysis_last_error.json")
         .map((name) => path.join(platformDir, name))
     : [];
 
@@ -216,6 +240,12 @@ function setPlatformSyncState(clientId: string, platform: string, next: Partial<
   }
   platformSyncState[clientId][platform] = updated;
   savePlatformSyncState();
+
+  // Push the change so the dashboard reflects loading/success/failed for this
+  // client+platform while a scoped run is in flight, instead of waiting for the
+  // whole run to finish.
+  broadcastSSE("sync-state-changed", { clientId, platform, state: updated }, clientId);
+
   return updated;
 }
 
@@ -223,10 +253,19 @@ export function getPlatformSyncState(clientId: string, platform: string): Platfo
   const stored = platformSyncState[clientId]?.[platform];
   if (stored) {
     const inferredFetch = getLatestAnalysisTimestamp(clientId, platform);
+    const lastFetch = stored.last_successful_fetch || inferredFetch;
+    let status: PlatformSyncStatus = stored.sync_status || (lastFetch ? "success" : "idle");
+
+    // A persisted "loading" with no process behind it is a leftover from a crashed
+    // or restarted run — don't leave the UI spinning forever.
+    if (status === "loading" && !isPlatformSyncing(clientId, platform)) {
+      status = lastFetch ? "success" : "idle";
+    }
+
     return {
       last_synced_at: stored.last_synced_at || inferredFetch,
-      last_successful_fetch: stored.last_successful_fetch || inferredFetch,
-      sync_status: inferredFetch ? "success" : (stored.sync_status || "idle"),
+      last_successful_fetch: lastFetch,
+      sync_status: status,
     };
   }
   return getDefaultPlatformSyncState(clientId, platform);
@@ -311,12 +350,21 @@ async function loadClientsWithCredentials(): Promise<Array<{
   }
 }
 
-async function runAgent(clientIds?: string[]): Promise<void> {
-  if (schedulerStatus.isRunning) {
+async function runAgent(options: AgentRunOptions = {}): Promise<void> {
+  const { clientIds, platforms } = options;
+  const isScoped = Boolean(clientIds?.length || platforms?.length);
+
+  // Only a full run has to wait for another run to finish; a scoped manual sync
+  // (single client/platform) may start right away — it skips any client/platform
+  // pair that already has an agent process attached to it.
+  if (!isScoped && activeRuns > 0) {
     log("Scheduler: Agent already running, skipping", "scheduler");
     return;
   }
 
+  const wantsPlatform = (platform: AgentPlatform) => !platforms?.length || platforms.includes(platform);
+
+  activeRuns++;
   schedulerStatus.isRunning = true;
   const startTime = Date.now();
   broadcastSSE("agent-run-started", { timestamp: new Date().toISOString() });
@@ -333,15 +381,21 @@ async function runAgent(clientIds?: string[]): Promise<void> {
       clients = clients.filter((c) => clientIds.includes(c.id));
       log(`Scheduler: Scoped run for clients: ${clientIds.join(", ")}`, "scheduler");
     }
+    if (platforms?.length) {
+      log(`Scheduler: Scoped run for platforms: ${platforms.join(", ")}`, "scheduler");
+    }
 
-    if (fs.existsSync(metaAgent)) {
-      const metaClients = clients.filter((c) => c.metaCreds?.META_ACCESS_TOKEN);
+    if (fs.existsSync(metaAgent) && wantsPlatform("meta")) {
+      const metaClients = clients
+        .filter((c) => c.metaCreds?.META_ACCESS_TOKEN)
+        .filter((c) => !isPlatformSyncing(c.id, "meta"));
       if (metaClients.length === 0) {
         log("Scheduler: No Meta clients with credentials configured — skipping Meta agent", "scheduler");
       }
       for (const client of metaClients) {
         log(`Scheduler: Running Meta Ads Agent for client '${client.id}'...`, "scheduler");
         const syncStartedAt = new Date().toISOString();
+        inFlightSyncs.add(syncKey(client.id, "meta"));
         setPlatformSyncState(client.id, "meta", {
           last_synced_at: syncStartedAt,
           sync_status: "loading",
@@ -390,18 +444,23 @@ async function runAgent(clientIds?: string[]): Promise<void> {
             sync_status: "failed",
           });
           log(`Scheduler: Meta agent failed for client '${client.id}': ${error.message}`, "scheduler");
+        } finally {
+          inFlightSyncs.delete(syncKey(client.id, "meta"));
         }
       }
     }
 
-    if (fs.existsSync(googleAgent)) {
-      const googleClients = clients.filter((c) => c.googleCreds?.GOOGLE_REFRESH_TOKEN);
+    if (fs.existsSync(googleAgent) && wantsPlatform("google")) {
+      const googleClients = clients
+        .filter((c) => c.googleCreds?.GOOGLE_REFRESH_TOKEN)
+        .filter((c) => !isPlatformSyncing(c.id, "google"));
       if (googleClients.length === 0) {
         log("Scheduler: No Google clients with credentials configured — skipping Google agent", "scheduler");
       }
       for (const client of googleClients) {
         log(`Scheduler: Running Google Ads Agent for client '${client.id}'...`, "scheduler");
         const syncStartedAt = new Date().toISOString();
+        inFlightSyncs.add(syncKey(client.id, "google"));
         setPlatformSyncState(client.id, "google", {
           last_synced_at: syncStartedAt,
           sync_status: "loading",
@@ -409,7 +468,7 @@ async function runAgent(clientIds?: string[]): Promise<void> {
         try {
           const pythonPath = resolvePythonPath();
           log(`Scheduler: Executing Google agent with ${pythonPath} for client ${client.id}`, "scheduler");
-          
+
           await execFileAsync(pythonPath, [googleAgent, "--client", client.id, "--multi-cadence"], {
             cwd: ADS_AGENT_DIR,
             timeout: 600000,
@@ -421,8 +480,10 @@ async function runAgent(clientIds?: string[]): Promise<void> {
             sync_status: "failed",
           });
           log(`Scheduler: Google agent failed for client '${client.id}': ${error.message}`, "scheduler");
+          inFlightSyncs.delete(syncKey(client.id, "google"));
           continue;
         }
+        inFlightSyncs.delete(syncKey(client.id, "google"));
         setPlatformSyncState(client.id, "google", {
           last_synced_at: new Date().toISOString(),
           last_successful_fetch: getLatestAnalysisTimestamp(client.id, "google"),
@@ -465,7 +526,8 @@ async function runAgent(clientIds?: string[]): Promise<void> {
     schedulerStatus.lastRunSuccess = true;
     schedulerStatus.lastRunDuration = duration;
     schedulerStatus.lastError = null;
-    schedulerStatus.isRunning = false;
+    activeRuns = Math.max(0, activeRuns - 1);
+    schedulerStatus.isRunning = activeRuns > 0;
 
     schedulerStatus.runHistory.unshift({
       timestamp: schedulerStatus.lastRun,
@@ -492,7 +554,8 @@ async function runAgent(clientIds?: string[]): Promise<void> {
     schedulerStatus.lastRunSuccess = false;
     schedulerStatus.lastRunDuration = duration;
     schedulerStatus.lastError = errorMessage;
-    schedulerStatus.isRunning = false;
+    activeRuns = Math.max(0, activeRuns - 1);
+    schedulerStatus.isRunning = activeRuns > 0;
 
     schedulerStatus.runHistory.unshift({
       timestamp: schedulerStatus.lastRun,
@@ -514,8 +577,24 @@ async function runAgent(clientIds?: string[]): Promise<void> {
   }
 }
 
-export function triggerManualRun(clientIds?: string[]): void {
-  runAgent(clientIds).catch((err) => log(`Manual run error: ${err.message}`, "scheduler"));
+export function triggerManualRun(options: AgentRunOptions = {}): void {
+  runAgent(options).catch((err) => log(`Manual run error: ${err.message}`, "scheduler"));
+}
+
+async function runAvailableFundsRefresh(): Promise<void> {
+  try {
+    const outcomes = await refreshAllAvailableFunds();
+    const failed = outcomes.filter((o) => !o.ok);
+    log(`Scheduler: Available funds refresh done — ${outcomes.length - failed.length}/${outcomes.length} succeeded`, "scheduler");
+    if (failed.length > 0) {
+      log(`Scheduler: Available funds failures: ${failed.map((f) => `${f.clientId}/${f.platform}: ${f.error}`).join("; ")}`, "scheduler");
+    }
+    // Live-push equivalent of Firestore onSnapshot: tell connected dashboards to
+    // refetch their cached available-funds value now that it's been updated.
+    broadcastSSE("available-funds-refreshed", { timestamp: new Date().toISOString() });
+  } catch (err: any) {
+    log(`Scheduler: Available funds refresh failed: ${err.message}`, "scheduler");
+  }
 }
 
 export function initScheduler(): void {
@@ -531,6 +610,17 @@ export function initScheduler(): void {
     timezone: "Asia/Kolkata",
   });
 
+  // Available funds (Meta wallet / Google account_budget) refresh every 30 minutes,
+  // mirroring the reference googleSync/metaSync Cloud Scheduler cadence.
+  cron.schedule("*/30 * * * *", () => {
+    log("Scheduler: 30-min trigger — refreshing available funds", "scheduler");
+    runAvailableFundsRefresh();
+  });
+
+  // Seed the cache shortly after boot so the first dashboard load doesn't have to
+  // wait up to 30 minutes for a value.
+  setTimeout(runAvailableFundsRefresh, 10_000);
+
   // Compute next run time
   const now = new Date();
   const nextRun = new Date(now);
@@ -542,5 +632,5 @@ export function initScheduler(): void {
   schedulerStatus.nextRun = nextRun.toISOString();
   saveStatus();
 
-  log("Scheduler: Initialized — daily run at 9:00 AM IST", "scheduler");
+  log("Scheduler: Initialized — daily run at 9:00 AM IST, available funds every 30 min", "scheduler");
 }

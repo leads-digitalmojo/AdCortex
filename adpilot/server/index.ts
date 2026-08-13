@@ -1,4 +1,5 @@
 import dotenv from "dotenv";
+import compression from "compression";
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
@@ -6,6 +7,7 @@ import { createServer } from "http";
 import { initScheduler } from "./scheduler";
 import { setupAuth, protectApiRoutes } from "./auth";
 import { runMigrations } from "./db";
+import { loadScoringConfig } from "./scoring-config";
 import path from "path";
 import fs from "fs";
 
@@ -46,6 +48,19 @@ if (allowedOrigin) {
     next();
   });
 }
+
+// ─── Compression ────────────────────────────────────────────────────
+// Analysis payloads are multi-megabyte JSON (search_terms_analysis alone runs to
+// ~1.7 MB on large accounts). gzip cuts that by roughly 10x on the wire.
+// SSE (/api/events) is excluded — buffering would stall live sync updates.
+app.use(
+  compression({
+    filter: (req, res) => {
+      if (req.path === "/api/events") return false;
+      return compression.filter(req, res);
+    },
+  }),
+);
 
 declare module "http" {
   interface IncomingMessage {
@@ -110,6 +125,7 @@ app.use((req, res, next) => {
 
 (async () => {
   await runMigrations();
+  await loadScoringConfig();
   await setupAuth(app);
   app.use(protectApiRoutes);
   await registerRoutes(httpServer, app);

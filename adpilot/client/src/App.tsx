@@ -20,68 +20,84 @@ import {
   DropdownMenuLabel,
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
-import { useState, useEffect } from "react";
+import { useState, useEffect, lazy, Suspense } from "react";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { CommandTerminal, CommandTerminalToggle } from "@/components/command-terminal";
+import { Skeleton } from "@/components/ui/skeleton";
 import LoginPage from "@/pages/login";
 import NotFound from "@/pages/not-found";
 import DashboardPage from "@/pages/dashboard";
-import CampaignsPage from "@/pages/campaigns";
-import CreativesPage from "@/pages/creatives";
-import AuditPage from "@/pages/audit";
-import RecommendationsPage from "@/pages/recommendations";
-import SettingsPage from "@/pages/settings";
-import CommandCenterPage from "@/pages/command-center";
-import AdsetsPage from "@/pages/adsets";
-import ExecutionLogPage from "@/pages/execution-log";
-import ManageClientsPage from "@/pages/manage-clients";
-import UsersPage from "@/pages/users";
-import BenchmarksPage from "@/pages/benchmarks";
-import BreakdownsPage from "@/pages/breakdowns";
-import GoogleQualityScorePage from "@/pages/google/quality-score";
-import GoogleSearchTermsPage from "@/pages/google/search-terms";
-import GoogleBiddingPage from "@/pages/google/bidding";
-import GoogleAudiencesPage from "@/pages/google/audiences";
-import GoogleRestructuringPage from "@/pages/google/restructuring";
-import CreativeCalendarPage from "@/pages/creative-calendar";
-import MtdDeliverablesPage from "@/pages/mtd-deliverables";
-import AnalyticsAdsPage from "@/pages/analytics-ads";
-import KeywordsPage from "@/pages/keywords.tsx";
-import AudiencesPage from "@/pages/audiences.tsx";
+
+// Route-level code splitting: these pages (large tables, recharts, etc.) are
+// only loaded when actually navigated to, instead of all being bundled into
+// the initial app load and mounted/evaluated together.
+const CampaignsPage = lazy(() => import("@/pages/campaigns"));
+const CreativesPage = lazy(() => import("@/pages/creatives"));
+const AuditPage = lazy(() => import("@/pages/audit"));
+const RecommendationsPage = lazy(() => import("@/pages/recommendations"));
+const SettingsPage = lazy(() => import("@/pages/settings"));
+const CommandCenterPage = lazy(() => import("@/pages/command-center"));
+const AdsetsPage = lazy(() => import("@/pages/adsets"));
+const ExecutionLogPage = lazy(() => import("@/pages/execution-log"));
+const ManageClientsPage = lazy(() => import("@/pages/manage-clients"));
+const UsersPage = lazy(() => import("@/pages/users"));
+const BenchmarksPage = lazy(() => import("@/pages/benchmarks"));
+const BreakdownsPage = lazy(() => import("@/pages/breakdowns"));
+const GoogleQualityScorePage = lazy(() => import("@/pages/google/quality-score"));
+const GoogleSearchTermsPage = lazy(() => import("@/pages/google/search-terms"));
+const GoogleBiddingPage = lazy(() => import("@/pages/google/bidding"));
+const GoogleAudiencesPage = lazy(() => import("@/pages/google/audiences"));
+const GoogleRestructuringPage = lazy(() => import("@/pages/google/restructuring"));
+const CreativeCalendarPage = lazy(() => import("@/pages/creative-calendar"));
+const MtdDeliverablesPage = lazy(() => import("@/pages/mtd-deliverables"));
+const AnalyticsAdsPage = lazy(() => import("@/pages/analytics-ads"));
+const KeywordsPage = lazy(() => import("@/pages/keywords.tsx"));
+const AudiencesPage = lazy(() => import("@/pages/audiences.tsx"));
 import { timeAgo } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { PerplexityAttribution } from "@/components/PerplexityAttribution";
 import { useLiveUpdates } from "@/hooks/use-live-updates";
 import { useNow } from "@/hooks/use-now";
 
+function RouteFallback() {
+  return (
+    <div className="p-6 space-y-4">
+      <Skeleton className="h-8 w-48" />
+      <Skeleton className="h-[500px] rounded-lg" />
+    </div>
+  );
+}
+
 function AppRouter() {
   return (
-    <Switch>
-      <Route path="/" component={DashboardPage} />
-      <Route path="/campaigns" component={CampaignsPage} />
-      <Route path="/adsets" component={AdsetsPage} />
-      <Route path="/creative-generation" component={CreativesPage} />
-      <Route path="/audit" component={AuditPage} />
-      <Route path="/recommendations" component={RecommendationsPage} />
-      <Route path="/command-center" component={CommandCenterPage} />
-      <Route path="/settings" component={SettingsPage} />
-      <Route path="/execution-log" component={ExecutionLogPage} />
-      <Route path="/manage-clients" component={ManageClientsPage} />
-      <Route path="/users" component={UsersPage} />
-      <Route path="/benchmarks" component={BenchmarksPage} />
-      <Route path="/breakdowns" component={BreakdownsPage} />
-      <Route path="/google/quality-score" component={GoogleQualityScorePage} />
-      <Route path="/google/search-terms" component={GoogleSearchTermsPage} />
-      <Route path="/google/bidding" component={GoogleBiddingPage} />
-      <Route path="/google/audiences" component={GoogleAudiencesPage} />
-      <Route path="/google/restructuring" component={GoogleRestructuringPage} />
-      <Route path="/creative-calendar" component={CreativeCalendarPage} />
-      <Route path="/mtd-deliverables" component={MtdDeliverablesPage} />
-      <Route path="/analytics/ads" component={AnalyticsAdsPage} />
-      <Route path="/keywords" component={KeywordsPage} />
-      <Route path="/audiences" component={AudiencesPage} />
-      <Route component={NotFound} />
-    </Switch>
+    <Suspense fallback={<RouteFallback />}>
+      <Switch>
+        <Route path="/" component={DashboardPage} />
+        <Route path="/campaigns" component={CampaignsPage} />
+        <Route path="/adsets" component={AdsetsPage} />
+        <Route path="/creative-generation" component={CreativesPage} />
+        <Route path="/audit" component={AuditPage} />
+        <Route path="/recommendations" component={RecommendationsPage} />
+        <Route path="/command-center" component={CommandCenterPage} />
+        <Route path="/settings" component={SettingsPage} />
+        <Route path="/execution-log" component={ExecutionLogPage} />
+        <Route path="/manage-clients" component={ManageClientsPage} />
+        <Route path="/users" component={UsersPage} />
+        <Route path="/benchmarks" component={BenchmarksPage} />
+        <Route path="/breakdowns" component={BreakdownsPage} />
+        <Route path="/google/quality-score" component={GoogleQualityScorePage} />
+        <Route path="/google/search-terms" component={GoogleSearchTermsPage} />
+        <Route path="/google/bidding" component={GoogleBiddingPage} />
+        <Route path="/google/audiences" component={GoogleAudiencesPage} />
+        <Route path="/google/restructuring" component={GoogleRestructuringPage} />
+        <Route path="/creative-calendar" component={CreativeCalendarPage} />
+        <Route path="/mtd-deliverables" component={MtdDeliverablesPage} />
+        <Route path="/analytics/ads" component={AnalyticsAdsPage} />
+        <Route path="/keywords" component={KeywordsPage} />
+        <Route path="/audiences" component={AudiencesPage} />
+        <Route component={NotFound} />
+      </Switch>
+    </Suspense>
   );
 }
 

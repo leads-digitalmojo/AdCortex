@@ -43,6 +43,13 @@ export interface ExecutionRequest {
   entityId: string;           // campaign_id, adset_id, or ad_id
   entityName: string;         // human-readable name
   entityType: "campaign" | "adset" | "ad";
+  clientId?: string;          // which dashboard client this action belongs to
+  // The client's own Meta access token/ad account, used instead of the shared
+  // legacy env token so budget currency conversion matches the right account.
+  // Optional only so this type doesn't force a breaking change on every field —
+  // routes.ts resolves and passes these for every real call site.
+  accessToken?: string;
+  adAccountId?: string;
   params?: {
     budgetAmount?: number;    // new daily budget in rupees (paise internally)
     currentBudget?: number;   // fallback current daily budget in rupees
@@ -62,6 +69,7 @@ export interface ExecutionResult {
   entityId: string;
   entityName: string;
   entityType: string;
+  clientId?: string;
   previousValue?: string;
   newValue?: string;
   metaApiResponse?: any;
@@ -156,11 +164,12 @@ async function fetchWithRetry(
 
 async function metaApiPost(
   entityId: string,
-  params: Record<string, string | number>
+  params: Record<string, string | number>,
+  accessToken?: string
 ): Promise<{ success: boolean; data?: any; error?: string }> {
   const url = `${META_BASE_URL}/${entityId}`;
   const body = new URLSearchParams();
-  body.append("access_token", getMetaAccessToken());
+  body.append("access_token", accessToken || getMetaAccessToken());
   for (const [key, value] of Object.entries(params)) {
     body.append(key, String(value));
   }
@@ -184,9 +193,10 @@ async function metaApiPost(
 
 async function metaApiGet(
   entityId: string,
-  fields: string[]
+  fields: string[],
+  accessToken?: string
 ): Promise<{ success: boolean; data?: any; error?: string }> {
-  const url = `${META_BASE_URL}/${entityId}?fields=${fields.join(",")}&access_token=${getMetaAccessToken()}`;
+  const url = `${META_BASE_URL}/${entityId}?fields=${fields.join(",")}&access_token=${accessToken || getMetaAccessToken()}`;
   try {
     const response = await fetchWithRetry(url, { method: "GET" });
     const data = await response.json();
@@ -201,16 +211,35 @@ async function metaApiGet(
 
 // ─── Core Execution Functions ─────────────────────────────────────
 
+// Zero-decimal currencies report whole-unit amounts already (no ×100 conversion).
+const ZERO_DECIMAL_CURRENCIES = new Set(["JPY", "KRW", "VND", "CLP", "ISK", "BIF", "DJF", "GNF", "KMF", "PYG", "RWF", "UGX", "VUV", "XAF", "XOF", "XPF"]);
+
+// Cache the ad account's currency divisor per request lifecycle to avoid an extra
+// API call on every budget mutation. Keyed by ad account ID.
+const currencyDivisorCache = new Map<string, number>();
+
+async function getAccountCurrencyDivisor(adAccountId: string | undefined, accessToken: string | undefined): Promise<number> {
+  if (!adAccountId) return 100; // legacy default (assumes a 2-decimal currency, e.g. INR/USD)
+  if (currencyDivisorCache.has(adAccountId)) return currencyDivisorCache.get(adAccountId)!;
+
+  const result = await metaApiGet(adAccountId, ["currency"], accessToken);
+  const currency = result.success ? result.data?.currency : undefined;
+  const divisor = currency && ZERO_DECIMAL_CURRENCIES.has(currency) ? 1 : 100;
+  currencyDivisorCache.set(adAccountId, divisor);
+  return divisor;
+}
+
 /**
  * Pause a campaign, adset, or ad.
  * Pre-flight check: if the entity is already PAUSED, skip the API call and log accordingly.
  */
 async function pauseEntity(
   entityId: string,
-  entityType: string
+  entityType: string,
+  accessToken?: string
 ): Promise<{ success: boolean; data?: any; error?: string; alreadyPaused?: boolean; previousValue?: string }> {
   // Pre-flight: GET current status
-  const statusResult = await metaApiGet(entityId, ["effective_status", "configured_status", "status"]);
+  const statusResult = await metaApiGet(entityId, ["effective_status", "configured_status", "status"], accessToken);
   if (statusResult.success && statusResult.data) {
     const currentStatus =
       statusResult.data.effective_status ||
@@ -225,7 +254,7 @@ async function pauseEntity(
     }
   }
 
-  const result = await metaApiPost(entityId, { status: "PAUSED" });
+  const result = await metaApiPost(entityId, { status: "PAUSED" }, accessToken);
   return {
     ...result,
     alreadyPaused: false,
@@ -238,27 +267,31 @@ async function pauseEntity(
 /**
  * Unpause (activate) a campaign, adset, or ad
  */
-async function unpauseEntity(entityId: string, entityType: string): Promise<{ success: boolean; data?: any; error?: string }> {
-  return metaApiPost(entityId, { status: "ACTIVE" });
+async function unpauseEntity(entityId: string, entityType: string, accessToken?: string): Promise<{ success: boolean; data?: any; error?: string }> {
+  return metaApiPost(entityId, { status: "ACTIVE" }, accessToken);
 }
 
 /**
- * Get current daily budget for an adset or campaign (in account currency's smallest unit)
+ * Get current daily budget for an adset or campaign, converted to the account's
+ * major currency unit (e.g. rupees for INR, dollars for USD, yen for JPY).
  */
-async function getCurrentBudget(entityId: string): Promise<number | null> {
-  const result = await metaApiGet(entityId, ["daily_budget", "lifetime_budget", "name"]);
+async function getCurrentBudget(entityId: string, accessToken?: string, adAccountId?: string): Promise<number | null> {
+  const result = await metaApiGet(entityId, ["daily_budget", "lifetime_budget", "name"], accessToken);
   if (!result.success || !result.data) return null;
-  // daily_budget is in the currency's smallest unit (paise for INR)
-  return result.data.daily_budget ? parseInt(result.data.daily_budget) : null;
+  if (!result.data.daily_budget) return null;
+  const divisor = await getAccountCurrencyDivisor(adAccountId, accessToken);
+  return parseInt(result.data.daily_budget) / divisor;
 }
 
 /**
- * Set daily budget for an adset or campaign
- * Amount is in RUPEES — we convert to PAISE (×100) for the API
+ * Set daily budget for an adset or campaign.
+ * Amount is in the account's major currency unit — converted to the account's
+ * smallest unit (e.g. ×100 for INR/USD, ×1 for zero-decimal currencies like JPY).
  */
-async function setBudget(entityId: string, amountRupees: number): Promise<{ success: boolean; data?: any; error?: string }> {
-  const amountPaise = Math.round(amountRupees * 100);
-  return metaApiPost(entityId, { daily_budget: amountPaise });
+async function setBudget(entityId: string, amount: number, accessToken?: string, adAccountId?: string): Promise<{ success: boolean; data?: any; error?: string }> {
+  const divisor = await getAccountCurrencyDivisor(adAccountId, accessToken);
+  const amountMinorUnit = Math.round(amount * divisor);
+  return metaApiPost(entityId, { daily_budget: amountMinorUnit }, accessToken);
 }
 
 // ─── Main Execution Handler ───────────────────────────────────────
@@ -270,6 +303,7 @@ export async function executeAction(req: ExecutionRequest): Promise<ExecutionRes
     entityId: req.entityId,
     entityName: req.entityName,
     entityType: req.entityType,
+    clientId: req.clientId,
     timestamp,
     requestedBy: req.requestedBy,
     requestedByName: req.requestedByName,
@@ -282,7 +316,7 @@ export async function executeAction(req: ExecutionRequest): Promise<ExecutionRes
       case "PAUSE_AD":
       case "PAUSE_ADSET":
       case "PAUSE_CAMPAIGN": {
-        const result = await pauseEntity(req.entityId, req.entityType);
+        const result = await pauseEntity(req.entityId, req.entityType, req.accessToken);
         const execResult: ExecutionResult = {
           ...baseResult,
           success: result.success,
@@ -301,7 +335,7 @@ export async function executeAction(req: ExecutionRequest): Promise<ExecutionRes
       case "UNPAUSE_AD":
       case "UNPAUSE_ADSET":
       case "UNPAUSE_CAMPAIGN": {
-        const result = await unpauseEntity(req.entityId, req.entityType);
+        const result = await unpauseEntity(req.entityId, req.entityType, req.accessToken);
         const execResult: ExecutionResult = {
           ...baseResult,
           success: result.success,
@@ -316,15 +350,15 @@ export async function executeAction(req: ExecutionRequest): Promise<ExecutionRes
 
       case "SCALE_BUDGET_UP":
       case "SCALE_BUDGET_DOWN": {
-        let currentPaise = await getCurrentBudget(req.entityId);
-        
+        let currentAmount = await getCurrentBudget(req.entityId, req.accessToken, req.adAccountId);
+
         // Fallback: use passed currentBudget if API fetch failed
-        if (currentPaise === null && req.params?.currentBudget) {
+        if (currentAmount === null && req.params?.currentBudget) {
           console.log(`[meta-execution] API budget fetch failed for ${req.entityId}, using fallback: ₹${req.params.currentBudget}`);
-          currentPaise = Math.round(req.params.currentBudget * 100);
+          currentAmount = req.params.currentBudget;
         }
 
-        if (currentPaise === null) {
+        if (currentAmount === null) {
           const execResult: ExecutionResult = {
             ...baseResult,
             success: false,
@@ -334,19 +368,18 @@ export async function executeAction(req: ExecutionRequest): Promise<ExecutionRes
           return execResult;
         }
 
-        const currentRupees = currentPaise / 100;
         const scalePct = req.params?.scalePercent || 20;
-        const multiplier = req.action === "SCALE_BUDGET_UP" 
-          ? 1 + scalePct / 100 
+        const multiplier = req.action === "SCALE_BUDGET_UP"
+          ? 1 + scalePct / 100
           : 1 - scalePct / 100;
-        const newRupees = Math.round(currentRupees * multiplier);
+        const newAmount = Math.round(currentAmount * multiplier);
 
-        const result = await setBudget(req.entityId, newRupees);
+        const result = await setBudget(req.entityId, newAmount, req.accessToken, req.adAccountId);
         const execResult: ExecutionResult = {
           ...baseResult,
           success: result.success,
-          previousValue: `₹${currentRupees}/day`,
-          newValue: result.success ? `₹${newRupees}/day` : undefined,
+          previousValue: `₹${currentAmount}/day`,
+          newValue: result.success ? `₹${newAmount}/day` : undefined,
           metaApiResponse: result.data,
           error: result.error,
         };
@@ -355,11 +388,10 @@ export async function executeAction(req: ExecutionRequest): Promise<ExecutionRes
       }
 
       case "SET_BUDGET": {
-        const currentPaise = await getCurrentBudget(req.entityId);
-        const currentRupees = currentPaise ? currentPaise / 100 : null;
-        const newRupees = req.params?.budgetAmount;
+        const currentAmount = await getCurrentBudget(req.entityId, req.accessToken, req.adAccountId);
+        const newAmount = req.params?.budgetAmount;
 
-        if (!newRupees || newRupees <= 0) {
+        if (!newAmount || newAmount <= 0) {
           const execResult: ExecutionResult = {
             ...baseResult,
             success: false,
@@ -369,12 +401,12 @@ export async function executeAction(req: ExecutionRequest): Promise<ExecutionRes
           return execResult;
         }
 
-        const result = await setBudget(req.entityId, newRupees);
+        const result = await setBudget(req.entityId, newAmount, req.accessToken, req.adAccountId);
         const execResult: ExecutionResult = {
           ...baseResult,
           success: result.success,
-          previousValue: currentRupees ? `₹${currentRupees}/day` : "unknown",
-          newValue: result.success ? `₹${newRupees}/day` : undefined,
+          previousValue: currentAmount ? `₹${currentAmount}/day` : "unknown",
+          newValue: result.success ? `₹${newAmount}/day` : undefined,
           metaApiResponse: result.data,
           error: result.error,
         };
@@ -420,9 +452,10 @@ export async function executeBatch(requests: ExecutionRequest[]): Promise<Execut
 /**
  * Get execution audit log
  */
-export function getAuditLog(limit = 50): AuditEntry[] {
+export function getAuditLog(limit = 50, clientId?: string): AuditEntry[] {
   const log = readAuditLog();
-  return log.slice(0, limit);
+  const filtered = clientId ? log.filter((e) => e.clientId === clientId) : log;
+  return filtered.slice(0, limit);
 }
 
 /**

@@ -297,6 +297,45 @@ export function recordExecution(
 }
 
 /**
+ * Record a manual action the user performed outside the dashboard (e.g. directly in
+ * Ads Manager). There's no entity/before-metrics to track, so it's logged as a
+ * NEUTRAL, already-resolved entry rather than left PENDING outcome evaluation.
+ */
+export function recordManualCompletion(
+  clientId: string,
+  platform: "meta" | "google",
+  note: string,
+  requestedByName?: string
+): LearningEntry {
+  const executionId = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+
+  const entry: LearningEntry = {
+    executionId,
+    clientId,
+    platform,
+    entityId: `manual:${executionId}`,
+    entityName: note.length > 60 ? `${note.slice(0, 60)}…` : note,
+    entityType: "manual",
+    action: "MANUAL_COMPLETE",
+    executedAt: new Date().toISOString(),
+    requestedByName,
+    reason: note,
+    beforeMetrics: { spend: 0, leads: 0, cpl: 0, ctr: 0, impressions: 0 },
+    outcome: "NEUTRAL",
+    outcomeReason: "Manually recorded action — outcome not auto-evaluated",
+    daysElapsed: 0,
+  };
+
+  const entries = readLearningData();
+  entries.unshift(entry);
+  if (entries.length > 1000) entries.length = 1000;
+  writeLearningData(entries);
+  appendStrategicInputToAgentHistory(entry);
+
+  return entry;
+}
+
+/**
  * Update outcomes for pending entries using fresh analysis data.
  * Called on each agent run or periodically.
  *

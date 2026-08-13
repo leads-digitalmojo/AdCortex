@@ -16,7 +16,8 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CREDS_FILE = os.path.join(SCRIPT_DIR, "google_ads_credentials.json")
 TOKEN_CACHE_FILE = os.path.join(SCRIPT_DIR, ".google_ads_token_cache.json")
 
-API_VERSION = "v21"
+# v21 sunset on 2026-08-05 — bump this whenever Google retires the current version.
+API_VERSION = "v25"
 BASE_URL = f"https://googleads.googleapis.com/{API_VERSION}"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 
@@ -68,7 +69,6 @@ AD_FIELDS = """
     metrics.impressions, metrics.clicks, metrics.cost_micros,
     metrics.conversions, metrics.all_conversions,
     metrics.ctr, metrics.average_cpc, metrics.cost_per_conversion,
-    metrics.video_views, metrics.video_view_rate,
     metrics.video_quartile_p25_rate, metrics.video_quartile_p50_rate,
     metrics.video_quartile_p75_rate, metrics.video_quartile_p100_rate
 """

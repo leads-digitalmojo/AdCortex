@@ -5,6 +5,11 @@
 * instead of hardcoding them. This allows runtime adjustment of scoring behavior.
 */
 
+import fs from "fs";
+import path from "path";
+
+const SCORING_CONFIG_FILE = path.resolve(import.meta.dirname, "../../ads_agent/data/scoring_config_overrides.json");
+
 export interface ScoringThresholds {
   // Cost metrics (CPL, CPC, CPQL, CPSV, CPM) — lower is better
   // Uses continuous formula: Score = 100 - ((ratio - 1) / (red_mult - 1)) * 60 for target < actual < red
@@ -104,18 +109,47 @@ export const DEFAULT_SCORING_CONFIG: ScoringConfig = {
 
 let cachedConfig: ScoringConfig = DEFAULT_SCORING_CONFIG;
 
+function mergeConfig(base: ScoringConfig, overrides: Partial<ScoringConfig>): ScoringConfig {
+  return {
+    ...base,
+    ...overrides,
+    thresholds: {
+      ...base.thresholds,
+      ...(overrides.thresholds || {}),
+    },
+    weights: {
+      ...base.weights,
+      ...(overrides.weights || {}),
+    },
+  };
+}
+
+function readPersistedOverrides(): Partial<ScoringConfig> | null {
+  try {
+    if (!fs.existsSync(SCORING_CONFIG_FILE)) return null;
+    return JSON.parse(fs.readFileSync(SCORING_CONFIG_FILE, "utf-8"));
+  } catch (err: any) {
+    console.error("[scoring-config] Failed to read persisted overrides, using defaults:", err.message || err);
+    return null;
+  }
+}
+
+function writePersistedOverrides(overrides: Partial<ScoringConfig>): void {
+  const dir = path.dirname(SCORING_CONFIG_FILE);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(SCORING_CONFIG_FILE, JSON.stringify(overrides, null, 2));
+}
+
 /**
- * Load scoring configuration from external source
- * For now, returns default config. Can be extended to load from:
- * - sop-database.json
- * - environment variables
- * - database
- * - API
+ * Load scoring configuration, merging any persisted admin overrides
+ * (ads_agent/data/scoring_config_overrides.json) on top of the built-in defaults.
+ * Updates the in-memory cache used by getScoringConfig()/getMetricWeights().
+ * Called once at server startup; safe to call again to re-sync from disk.
  */
 export async function loadScoringConfig(): Promise<ScoringConfig> {
-  // TODO: Implement dynamic loading from sop-database.json or other source
-  // For now, return the default config
-  return DEFAULT_SCORING_CONFIG;
+  const overrides = readPersistedOverrides();
+  cachedConfig = overrides ? mergeConfig(DEFAULT_SCORING_CONFIG, overrides) : { ...DEFAULT_SCORING_CONFIG };
+  return cachedConfig;
 }
 
 /**
@@ -126,28 +160,28 @@ export function getScoringConfig(): ScoringConfig {
 }
 
 /**
- * Update scoring configuration at runtime
+ * Update scoring configuration at runtime and persist it so the change survives
+ * a server restart.
  */
 export function setScoringConfig(config: Partial<ScoringConfig>): void {
-  cachedConfig = {
-    ...cachedConfig,
-    ...config,
-    thresholds: {
-      ...cachedConfig.thresholds,
-      ...(config.thresholds || {}),
-    },
-    weights: {
-      ...cachedConfig.weights,
-      ...(config.weights || {}),
-    },
-  };
+  cachedConfig = mergeConfig(cachedConfig, config);
+  try {
+    writePersistedOverrides(cachedConfig);
+  } catch (err: any) {
+    console.error("[scoring-config] Failed to persist scoring config override:", err.message || err);
+  }
 }
 
 /**
- * Reset to default configuration
+ * Reset to default configuration (also clears any persisted override file).
  */
 export function resetScoringConfig(): void {
   cachedConfig = { ...DEFAULT_SCORING_CONFIG };
+  try {
+    if (fs.existsSync(SCORING_CONFIG_FILE)) fs.unlinkSync(SCORING_CONFIG_FILE);
+  } catch (err: any) {
+    console.error("[scoring-config] Failed to remove persisted override file:", err.message || err);
+  }
 }
 
 /**

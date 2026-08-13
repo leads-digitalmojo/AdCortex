@@ -344,6 +344,7 @@ export default function CampaignsPage() {
     { key: "ctr" as SortKey, label: "CTR", align: "right" },
     { key: "cvr" as SortKey, label: "CVR", align: "right" },
     { key: "cpl" as SortKey, label: "CPL", align: "right" },
+    { key: "quality_score" as SortKey, label: "QS", align: "right" },
     { key: "search_impression_share" as SortKey, label: "Imp. Share", align: "right" },
     { key: "search_rank_lost_is" as SortKey, label: "Rank Lost", align: "right" },
     { key: "search_budget_lost_is" as SortKey, label: "Budg. Lost", align: "right" },
@@ -378,6 +379,7 @@ export default function CampaignsPage() {
     { key: "leads" as SortKey, label: "Leads", align: "right" },
     { key: "cpl" as SortKey, label: "CPL", align: "right" },
     { key: "ctr" as SortKey, label: "CTR", align: "right" },
+    { key: "cvr" as SortKey, label: "CVR", align: "right" },
     { key: "cpc" as SortKey, label: "CPC", align: "right" },
     { key: "cpm" as SortKey, label: "CPM", align: "right" },
     { key: "frequency" as SortKey, label: "Freq", align: "right" },
@@ -433,6 +435,13 @@ export default function CampaignsPage() {
         {(val || "—").toString().replace(/_/g, " ")}
       </td>
     );
+
+    if (col.key === "quality_score") {
+      if (val == null) return <td key={col.key} className="p-3 text-right text-muted-foreground text-xs">—</td>;
+      const qs = Number(val);
+      const qsColor = qs >= 7 ? "text-emerald-400" : qs >= 5 ? "text-amber-400" : "text-red-400";
+      return <td key={col.key} className={`p-3 text-right tabular-nums font-semibold ${qsColor}`}>{qs.toFixed(1)}/10</td>;
+    }
 
     const rowIsPct = ["ctr", "cvr", "search_impression_share", "search_rank_lost_is", "search_budget_lost_is", "top_is", "tsr", "vhr", "ptr"].includes(col.key as string);
     const rowIsINR = ["daily_budget", "cost", "spend", "cpl", "avg_cpc", "average_cpm", "target_cpa", "cpsv"].includes(col.key as string);

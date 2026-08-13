@@ -18,6 +18,7 @@ import {
 } from "./meta-execution";
 import {
   recordExecution,
+  recordManualCompletion,
   getLearningData,
   getLearningSummary,
   triggerOutcomeUpdate,
@@ -41,12 +42,15 @@ import {
   appendGoogleAuditEntry,
   type GoogleExecutionRequest,
   type GoogleExecutionActionType,
+  type GoogleAdsClientCredentials,
 } from "./google-execution";
 import {
   addSSEClient,
   getPlatformSyncState,
   getSchedulerStatus,
+  isPlatformSyncing,
   triggerManualRun,
+  type AgentPlatform,
 } from "./scheduler";
 import { handleAICommand } from "./ai-command";
 import {
@@ -63,9 +67,10 @@ import {
 } from "./creative-hub";
 import { generateBiddingRecommendations } from "./bidding-intelligence";
 import { storage } from "./storage";
-import { requireAdmin, requireOwnership, requireAuth, getUserById } from "./auth";
+import { requireAdmin, requireOwnership, requireAuth, getUserById, enforceOwnership } from "./auth";
 import { insightsEngine } from "./intelligence-engine";
 import { getCache, setCache, invalidateCachePattern, cacheKey } from "./cache";
+import { computeMetaAvailableFunds, computeGoogleAvailableFunds, getCachedAvailableFunds, setCachedAvailableFunds } from "./available-funds";
 
 // ─── Multi-Client Registry ─────────────────────────────────────────
 // The registry is now persisted to disk so clients added via the UI survive restarts.
@@ -145,7 +150,8 @@ const REGISTRY_FILE = path.join(DATA_BASE, "clients_registry.json");
 const CREDENTIALS_FILE = path.join(DATA_BASE, "clients_credentials.json");
 const GOOGLE_ADS_TOKEN_CACHE = path.resolve(import.meta.dirname, "../../ads_agent/.google_ads_token_cache.json");
 const LEGACY_GOOGLE_CREDS_FILE = path.resolve(import.meta.dirname, "../../ads_agent/google_ads_credentials.json");
-const GOOGLE_ADS_API_VERSION = "v21";
+// v21 sunset on 2026-08-05 — bump this whenever Google retires the current version.
+const GOOGLE_ADS_API_VERSION = "v25";
 const GOOGLE_ADS_BASE_URL = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}`;
 const GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
 
@@ -328,6 +334,54 @@ function getValidGoogleCreds(creds?: ClientCredentials) {
 
 function getEffectiveMetaCreds(clientId: string, credsStore: Record<string, ClientCredentials>) {
   return getValidMetaCreds(credsStore[clientId]) || null;
+}
+
+/**
+ * Resolve the customerId + credentials for a Google execution request, scoped to
+ * this specific client. Every route that calls executeGoogleAction/executeGoogleBatch
+ * must use this — passing nothing would fall back to a single shared legacy config
+ * and risk executing against the wrong client's ad account.
+ */
+async function resolveGoogleExecCreds(clientId: string): Promise<
+  { customerId: string; credentials: GoogleAdsClientCredentials } | { error: string }
+> {
+  const credsStore = await loadCredentials();
+  const google = getValidGoogleCreds(credsStore[clientId]);
+  if (!google) {
+    return { error: "Google credentials are not configured for this client" };
+  }
+  const customerId = normalizeGoogleAccountId(google.customerId);
+  if (!customerId) {
+    return { error: "Google customer ID is not configured for this client" };
+  }
+  return {
+    customerId,
+    credentials: {
+      clientId: google.clientId,
+      clientSecret: google.clientSecret,
+      refreshToken: google.refreshToken,
+      developerToken: google.developerToken,
+      mccId: google.mccId,
+    },
+  };
+}
+
+/**
+ * Resolve the access token + ad account for a Meta execution request, scoped to
+ * this specific client. Every route that calls executeAction/executeBatch (Meta)
+ * must use this — passing nothing would fall back to a single shared legacy env
+ * token, which won't apply currency conversion correctly for non-2-decimal
+ * currencies and doesn't guarantee it's even the right client's token.
+ */
+async function resolveMetaExecCreds(clientId: string): Promise<
+  { accessToken: string; adAccountId: string } | { error: string }
+> {
+  const credsStore = await loadCredentials();
+  const meta = getValidMetaCreds(credsStore[clientId]);
+  if (!meta) {
+    return { error: "Meta credentials are not configured for this client" };
+  }
+  return { accessToken: meta.accessToken, adAccountId: meta.adAccountId };
 }
 
 function syncLegacyGoogleCredentialsFile(google?: ClientCredentials["google"]): void {
@@ -926,6 +980,197 @@ export async function registerRoutes(
     }
   });
 
+  // ─── Google MCC bulk discovery / import ─────────────────────────
+  // Lets an admin enter one set of MCC-level OAuth credentials, discover every
+  // child ad account under that MCC via the customer_client resource, and
+  // create + wire up an AdPilot client for each selected account in one go —
+  // instead of manually adding clients one at a time and pasting the same
+  // OAuth creds into each.
+
+  interface MccOAuthInput {
+    oauthClientId: string;
+    oauthClientSecret: string;
+    refreshToken: string;
+    developerToken: string;
+    mccId: string;
+  }
+
+  function validateMccInput(body: any): MccOAuthInput | null {
+    const { oauthClientId, oauthClientSecret, refreshToken, developerToken, mccId } = body || {};
+    if (!oauthClientId || !oauthClientSecret || !refreshToken || !developerToken || !mccId) return null;
+    return { oauthClientId, oauthClientSecret, refreshToken, developerToken, mccId: normalizeGoogleAccountId(mccId) };
+  }
+
+  // POST /api/google/mcc-accounts — discover accounts under an MCC
+  app.post("/api/google/mcc-accounts", requireAdmin, async (req, res) => {
+    try {
+      const input = validateMccInput(req.body);
+      if (!input) {
+        return res.status(400).json({ error: "oauthClientId, oauthClientSecret, refreshToken, developerToken, and mccId are all required" });
+      }
+
+      const accessToken = await getGoogleAccessTokenForClient({
+        clientId: input.oauthClientId,
+        clientSecret: input.oauthClientSecret,
+        refreshToken: input.refreshToken,
+        developerToken: input.developerToken,
+        mccId: input.mccId,
+        customerId: input.mccId,
+      });
+
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${accessToken}`,
+        "developer-token": input.developerToken,
+        "Content-Type": "application/json",
+      };
+
+      // level <= 1 covers a single-level MCC hierarchy (the manager account itself,
+      // plus its directly managed accounts). Nested sub-MCCs are returned but not
+      // auto-expanded — this matches the common single-level agency setup.
+      const resp = await fetch(`${GOOGLE_ADS_BASE_URL}/customers/${input.mccId}/googleAds:search`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          query: `
+            SELECT
+              customer_client.client_customer,
+              customer_client.id,
+              customer_client.descriptive_name,
+              customer_client.level,
+              customer_client.manager,
+              customer_client.status,
+              customer_client.currency_code,
+              customer_client.time_zone
+            FROM customer_client
+            WHERE customer_client.level <= 1
+          `,
+        }),
+      });
+
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok) {
+        return res.status(502).json({ error: parseGoogleAdsApiError(data) || `Google Ads API request failed (${resp.status})` });
+      }
+
+      const rows: any[] = data?.results || [];
+      const accounts = rows
+        .filter((r) => r.customerClient?.level > 0) // exclude the MCC row itself
+        .map((r) => ({
+          customerId: normalizeGoogleAccountId(String(r.customerClient.id)),
+          name: r.customerClient.descriptiveName || `Account ${r.customerClient.id}`,
+          isManager: Boolean(r.customerClient.manager),
+          status: r.customerClient.status,
+          currencyCode: r.customerClient.currencyCode || null,
+          timeZone: r.customerClient.timeZone || null,
+        }));
+
+      res.json({ mccId: input.mccId, accounts });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || "Failed to discover MCC accounts" });
+    }
+  });
+
+  // POST /api/clients/bulk-import-google — create a client + Google credentials
+  // for each selected MCC account
+  app.post("/api/clients/bulk-import-google", requireAdmin, async (req, res) => {
+    try {
+      const input = validateMccInput(req.body);
+      if (!input) {
+        return res.status(400).json({ error: "oauthClientId, oauthClientSecret, refreshToken, developerToken, and mccId are all required" });
+      }
+      const accounts: Array<{ customerId: string; name: string }> = Array.isArray(req.body.accounts) ? req.body.accounts : [];
+      if (accounts.length === 0) {
+        return res.status(400).json({ error: "accounts must be a non-empty array" });
+      }
+      if (accounts.length > 50) {
+        return res.status(400).json({ error: "Maximum 50 accounts per import" });
+      }
+
+      const user = req.authUser!;
+      const registry = await loadRegistry();
+      const results: Array<{ customerId: string; name: string; clientId?: string; success: boolean; error?: string }> = [];
+
+      for (const account of accounts) {
+        try {
+          if (!account.customerId || !account.name) {
+            results.push({ customerId: account.customerId || "", name: account.name || "", success: false, error: "Missing customerId or name" });
+            continue;
+          }
+
+          let id = toClientId(account.name.trim());
+          if (registry.find((c) => c.id === id)) {
+            // Disambiguate by appending the Google customer ID rather than skipping —
+            // two accounts can share a display name (e.g. franchise locations).
+            id = `${id}-${normalizeGoogleAccountId(account.customerId)}`;
+          }
+          if (registry.find((c) => c.id === id)) {
+            results.push({ customerId: account.customerId, name: account.name, success: false, error: `A client with id '${id}' already exists` });
+            continue;
+          }
+
+          const newClient: ClientConfig = {
+            id,
+            name: account.name.trim(),
+            shortName: account.name.trim(),
+            project: account.name.trim(),
+            location: "",
+            createdBy: user.id,
+            targetLocations: [],
+            platforms: {
+              meta: {
+                enabled: false,
+                dataPath: path.join(DATA_BASE, `clients/${id}/meta/analysis.json`),
+                label: "Meta Ads",
+              },
+              google: {
+                enabled: true,
+                dataPath: path.join(DATA_BASE, `clients/${id}/google/analysis.json`),
+                label: "Google Ads",
+              },
+            },
+            targets: {},
+            createdAt: new Date().toISOString(),
+          };
+
+          fs.mkdirSync(path.join(DATA_BASE, `clients/${id}/meta`), { recursive: true });
+          fs.mkdirSync(path.join(DATA_BASE, `clients/${id}/google`), { recursive: true });
+
+          const insertPayload = { ...newClient };
+          delete (insertPayload as any).createdAt;
+          await storage.createClient(insertPayload);
+          registry.push(newClient);
+
+          await storage.saveCredentials(id, {
+            clientId: id,
+            google: {
+              clientId: input.oauthClientId,
+              clientSecret: input.oauthClientSecret,
+              refreshToken: input.refreshToken,
+              developerToken: input.developerToken,
+              mccId: input.mccId,
+              customerId: normalizeGoogleAccountId(account.customerId),
+            },
+            updatedAt: new Date().toISOString(),
+          });
+
+          results.push({ customerId: account.customerId, name: account.name, clientId: id, success: true });
+        } catch (err: any) {
+          results.push({ customerId: account.customerId || "", name: account.name || "", success: false, error: err.message || "Failed to import" });
+        }
+      }
+
+      fs.writeFileSync(path.join(DATA_BASE, "clients_registry.json"), JSON.stringify(registry, null, 2));
+
+      res.json({
+        results,
+        total: results.length,
+        succeeded: results.filter((r) => r.success).length,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || "Bulk import failed" });
+    }
+  });
+
   // PUT /api/clients/:clientId/credentials — save/update credentials
   app.put("/api/clients/:clientId/credentials", async (req, res) => {
     try {
@@ -1144,14 +1389,44 @@ export async function registerRoutes(
     // Persist to action_logs for learning database
     appendActionLog({ id, clientId, platform, action, strategic_call: strategic_call.trim(), timestamp });
 
-    // If approved with executionDetails, execute the action via Meta API
+    // If approved with executionDetails, execute the action via the appropriate ad platform API
     if (action === "approved" && executionDetails) {
       try {
+        if (platform === "google") {
+          const googleCreds = await resolveGoogleExecCreds(clientId);
+          if ("error" in googleCreds) {
+            return res.json({ success: true, id, action, execution: { success: false, error: googleCreds.error } });
+          }
+          const execReq: GoogleExecutionRequest = {
+            action: executionDetails.executionAction as GoogleExecutionActionType,
+            entityId: executionDetails.entityId,
+            entityName: executionDetails.entityName || executionDetails.entityId,
+            entityType: executionDetails.entityType || "ad_group",
+            clientId,
+            customerId: googleCreds.customerId,
+            credentials: googleCreds.credentials,
+            params: {
+              ...(executionDetails.params || {}),
+              recommendationId: id,
+            },
+            requestedBy: "user",
+          };
+          const execResult = await executeGoogleAction(execReq);
+          return res.json({ success: true, id, action, execution: execResult });
+        }
+
+        const metaCreds = await resolveMetaExecCreds(clientId);
+        if ("error" in metaCreds) {
+          return res.json({ success: true, id, action, execution: { success: false, error: metaCreds.error } });
+        }
         const execReq: ExecutionRequest = {
           action: executionDetails.executionAction as ExecutionActionType,
           entityId: executionDetails.entityId,
           entityName: executionDetails.entityName || executionDetails.entityId,
           entityType: executionDetails.entityType || "adset",
+          clientId,
+          accessToken: metaCreds.accessToken,
+          adAccountId: metaCreds.adAccountId,
           params: {
             ...(executionDetails.params || {}),
             recommendationId: id,
@@ -1490,7 +1765,8 @@ export async function registerRoutes(
   // Get execution audit log
   app.get("/api/audit-log", requireAdmin, (_req, res) => {
     const limit = parseInt(_req.query.limit as string) || 50;
-    const log = getAuditLog(limit);
+    const clientId = (_req.query.clientId as string) || undefined;
+    const log = getAuditLog(limit, clientId);
     res.json(log);
   });
 
@@ -1500,6 +1776,10 @@ export async function registerRoutes(
     try {
       const { clientId, platform = "meta" } = req.body || {};
       if (!clientId) return res.status(400).json({ error: "clientId is required" });
+      const metaCreds = await resolveMetaExecCreds(clientId);
+      if ("error" in metaCreds) {
+        return res.status(400).json({ error: metaCreds.error });
+      }
       const data = await readAnalysisData(clientId, platform);
 
       const insights: any[] = data.intellect_insights || [];
@@ -1534,6 +1814,7 @@ export async function registerRoutes(
               entityId: matchedAdset.adset_id,
               entityName: matchedAdset.adset_name,
               entityType: "adset",
+              clientId,
               params: {
                 reason: insight.detail,
                 playbookRef: insight.type,
@@ -1546,6 +1827,7 @@ export async function registerRoutes(
               entityId: matchedCampaign.campaign_id,
               entityName: matchedCampaign.campaign_name,
               entityType: "campaign",
+              clientId,
               params: {
                 reason: insight.detail,
                 playbookRef: insight.type,
@@ -1560,7 +1842,11 @@ export async function registerRoutes(
         return res.json({ results: [], total: 0, succeeded: 0, message: "No matching entities found for auto-execute" });
       }
 
-      const results = await executeBatch(execRequests);
+      const results = await executeBatch(execRequests.map((r) => ({
+        ...r,
+        accessToken: metaCreds.accessToken,
+        adAccountId: metaCreds.adAccountId,
+      })));
       res.json({
         results,
         total: results.length,
@@ -1584,6 +1870,113 @@ export async function registerRoutes(
         });
       }
 
+      // This route used to unconditionally run Meta's adset-level logic regardless of
+      // :platform — for Google clients it built Meta-shaped requests with an
+      // entityType Meta doesn't recognize, so it always failed (or worse, could have
+      // targeted the wrong entity). Google gets its own campaign-level branch here,
+      // matching the dedicated /google/quick-action route's logic.
+      if (platform === "google") {
+        const googleCreds = await resolveGoogleExecCreds(clientId);
+        if ("error" in googleCreds) {
+          return res.status(400).json({ error: googleCreds.error });
+        }
+
+        const data = await readAnalysisData(clientId, "google");
+        const campaigns: any[] = data.campaign_analysis || data.campaign_audit || [];
+        const googleExecRequests: GoogleExecutionRequest[] = [];
+
+        switch (actionType) {
+          case "SCALE_WINNERS": {
+            const winners = campaigns.filter((c: any) => c.classification === "WINNER");
+            for (const w of winners) {
+              if (w.campaign_id || w.id) {
+                googleExecRequests.push({
+                  action: "SCALE_BUDGET_UP",
+                  entityId: w.campaign_id || w.id,
+                  entityName: w.campaign_name || w.name || w.campaign_id,
+                  entityType: "campaign",
+                  clientId,
+                  params: {
+                    scalePercent,
+                    reason: `Quick Action: Scale winner +${scalePercent}% (score ${w.health_score}, CPL ₹${w.cpl?.toFixed(0) || "N/A"})`,
+                  },
+                  requestedBy: "user",
+                });
+              }
+            }
+            break;
+          }
+          case "PAUSE_UNDERPERFORMERS": {
+            const underperformers = campaigns.filter(
+              (c: any) => c.should_pause === true || c.classification === "UNDERPERFORMER"
+            );
+            for (const u of underperformers) {
+              if (u.campaign_id || u.id) {
+                googleExecRequests.push({
+                  action: "PAUSE_CAMPAIGN",
+                  entityId: u.campaign_id || u.id,
+                  entityName: u.campaign_name || u.name || u.campaign_id,
+                  entityType: "campaign",
+                  clientId,
+                  params: {
+                    reason: `Quick Action: Pause underperformer (score ${u.health_score}, ${u.auto_pause_reasons?.join("; ") || "UNDERPERFORMER"})`,
+                  },
+                  requestedBy: "user",
+                });
+              }
+            }
+            break;
+          }
+          case "FIX_LEARNING_LIMITED": {
+            const limited = campaigns.filter((c: any) =>
+              c.learning_status === "LEARNING_LIMITED" || c.bidding_status === "LEARNING"
+            );
+            for (const ll of limited) {
+              if (ll.campaign_id || ll.id) {
+                googleExecRequests.push({
+                  action: "SCALE_BUDGET_UP",
+                  entityId: ll.campaign_id || ll.id,
+                  entityName: ll.campaign_name || ll.name || ll.campaign_id,
+                  entityType: "campaign",
+                  clientId,
+                  params: {
+                    scalePercent: 30,
+                    reason: `Quick Action: Fix Learning Limited - scale budget +30%`,
+                  },
+                  requestedBy: "user",
+                });
+              }
+            }
+            break;
+          }
+        }
+
+        if (googleExecRequests.length === 0) {
+          return res.json({
+            results: [],
+            total: 0,
+            succeeded: 0,
+            message: `No matching campaigns found for ${actionType}`,
+          });
+        }
+
+        const googleResults = await executeGoogleBatch(googleExecRequests.map((r) => ({
+          ...r,
+          customerId: googleCreds.customerId,
+          credentials: googleCreds.credentials,
+        })));
+        return res.json({
+          results: googleResults,
+          total: googleResults.length,
+          succeeded: googleResults.filter((r) => r.success).length,
+        });
+      }
+
+      const metaCreds = await resolveMetaExecCreds(clientId);
+      if ("error" in metaCreds) {
+        return res.status(400).json({ error: metaCreds.error });
+      }
+
       const data = await readAnalysisData(clientId, platform);
       const adsets: any[] = data.adset_analysis || [];
       const execRequests: ExecutionRequest[] = [];
@@ -1598,6 +1991,7 @@ export async function registerRoutes(
                 entityId: w.adset_id,
                 entityName: w.adset_name || w.adset_id,
                 entityType: "adset",
+                clientId,
                 params: {
                   scalePercent,
                   reason: `Quick Action: Scale winner +${scalePercent}% (score ${w.health_score}, CPL ₹${w.cpl?.toFixed(0) || "N/A"})`,
@@ -1619,6 +2013,7 @@ export async function registerRoutes(
                 entityId: u.adset_id,
                 entityName: u.adset_name || u.adset_id,
                 entityType: "adset",
+                clientId,
                 params: {
                   reason: `Quick Action: Pause underperformer (score ${u.health_score}, ${u.auto_pause_reasons?.join("; ") || "classification: UNDERPERFORMER"})`,
                 },
@@ -1637,6 +2032,7 @@ export async function registerRoutes(
                 entityId: ll.adset_id,
                 entityName: ll.adset_name || ll.adset_id,
                 entityType: "adset",
+                clientId,
                 params: {
                   scalePercent: 30,
                   reason: `Quick Action: Fix Learning Limited - scale budget +30% (current budget ₹${ll.daily_budget?.toFixed(0) || "N/A"})`,
@@ -1658,7 +2054,11 @@ export async function registerRoutes(
         });
       }
 
-      const results = await executeBatch(execRequests);
+      const results = await executeBatch(execRequests.map((r) => ({
+        ...r,
+        accessToken: metaCreds.accessToken,
+        adAccountId: metaCreds.adAccountId,
+      })));
       res.json({
         results,
         total: results.length,
@@ -1672,6 +2072,99 @@ export async function registerRoutes(
   app.post("/api/clients/:clientId/:platform/auto-execute-now", requireOwnership, async (req, res) => {
     try {
       const { clientId, platform } = req.params as Record<string, string>;
+
+      // This route used to unconditionally run Meta's ad/adset-level logic regardless
+      // of :platform — for Google clients it built Meta-shaped requests with entity
+      // types Google doesn't recognize. Google gets its own branch here, matching the
+      // dedicated /google/auto-execute-now route's campaign/ad_group/ad logic.
+      if (platform === "google") {
+        const googleCreds = await resolveGoogleExecCreds(clientId);
+        if ("error" in googleCreds) {
+          return res.status(400).json({ error: googleCreds.error });
+        }
+
+        const data = await readAnalysisData(clientId, "google");
+        const googleExecRequests: GoogleExecutionRequest[] = [];
+
+        const campaigns: any[] = data.campaign_analysis || data.campaign_audit || [];
+        for (const camp of campaigns) {
+          if (camp.should_pause && (camp.campaign_id || camp.id)) {
+            googleExecRequests.push({
+              action: "PAUSE_CAMPAIGN",
+              entityId: camp.campaign_id || camp.id,
+              entityName: camp.campaign_name || camp.name || camp.campaign_id,
+              entityType: "campaign",
+              clientId,
+              params: {
+                reason: `Auto-pause: ${(camp.auto_pause_reasons || []).join("; ") || "flagged for auto-pause"}`,
+              },
+              requestedBy: "auto",
+            });
+          }
+        }
+
+        const adGroups: any[] = (data as any).ad_group_analysis || [];
+        for (const ag of adGroups) {
+          if (ag.should_pause && (ag.ad_group_id || ag.id)) {
+            googleExecRequests.push({
+              action: "PAUSE_AD_GROUP",
+              entityId: ag.ad_group_id || ag.id,
+              entityName: ag.ad_group_name || ag.name || ag.ad_group_id,
+              entityType: "ad_group",
+              clientId,
+              params: {
+                reason: `Auto-pause: ${(ag.auto_pause_reasons || []).join("; ") || "flagged for auto-pause"}`,
+              },
+              requestedBy: "auto",
+            });
+          }
+        }
+
+        const ads: any[] = (data as any).ad_analysis || (data as any).creative_health || [];
+        for (const ad of ads) {
+          if (ad.should_pause && (ad.ad_id || ad.id)) {
+            if (!googleExecRequests.some((r) => r.entityId === (ad.ad_id || ad.id))) {
+              googleExecRequests.push({
+                action: "PAUSE_AD",
+                entityId: ad.ad_id || ad.id,
+                entityName: ad.ad_name || ad.name || ad.ad_id,
+                entityType: "ad",
+                clientId,
+                params: {
+                  reason: `Auto-pause: ${(ad.auto_pause_reasons || []).join("; ") || "flagged for auto-pause"}`,
+                },
+                requestedBy: "auto",
+              });
+            }
+          }
+        }
+
+        if (googleExecRequests.length === 0) {
+          return res.json({
+            results: [],
+            total: 0,
+            succeeded: 0,
+            message: "No entities matching auto-pause criteria found",
+          });
+        }
+
+        const googleResults = await executeGoogleBatch(googleExecRequests.map((r) => ({
+          ...r,
+          customerId: googleCreds.customerId,
+          credentials: googleCreds.credentials,
+        })));
+        return res.json({
+          results: googleResults,
+          total: googleResults.length,
+          succeeded: googleResults.filter((r) => r.success).length,
+        });
+      }
+
+      const metaCreds = await resolveMetaExecCreds(clientId);
+      if ("error" in metaCreds) {
+        return res.status(400).json({ error: metaCreds.error });
+      }
+
       const data = await readAnalysisData(clientId, platform);
 
       const execRequests: ExecutionRequest[] = [];
@@ -1685,6 +2178,7 @@ export async function registerRoutes(
             entityId: ad.ad_id,
             entityName: ad.ad_name || ad.ad_id,
             entityType: "ad",
+            clientId,
             params: {
               reason: `Auto-pause: ${(ad.auto_pause_reasons || []).join("; ") || "scored for auto-pause"}`,
             },
@@ -1704,6 +2198,7 @@ export async function registerRoutes(
               entityId: ad.ad_id,
               entityName: ad.ad_name || ad.ad_id,
               entityType: "ad",
+              clientId,
               params: {
                 reason: `Auto-pause: ${(ad.auto_pause_reasons || []).join("; ") || "should_pause flagged in creative_health"}`,
               },
@@ -1722,6 +2217,7 @@ export async function registerRoutes(
             entityId: adset.adset_id,
             entityName: adset.adset_name || adset.adset_id,
             entityType: "adset",
+            clientId,
             params: {
               reason: `Auto-pause: ${(adset.auto_pause_reasons || []).join("; ") || "should_pause flagged in adset_analysis"}`,
             },
@@ -1739,7 +2235,11 @@ export async function registerRoutes(
         });
       }
 
-      const results = await executeBatch(execRequests);
+      const results = await executeBatch(execRequests.map((r) => ({
+        ...r,
+        accessToken: metaCreds.accessToken,
+        adAccountId: metaCreds.adAccountId,
+      })));
       res.json({
         results,
         total: results.length,
@@ -1772,6 +2272,7 @@ export async function registerRoutes(
           entityId,
           entityName: entityName || entityId,
           entityType,
+          clientId,
           previousValue: action,
           newValue: action === "MARK_COMPLETE" ? "completed" : action === "REJECT" ? "rejected" : "deferred",
           timestamp: new Date().toISOString(),
@@ -1806,41 +2307,90 @@ export async function registerRoutes(
             strategicCall,
             actorName
           );
-        } catch (_) { /* best-effort */ }
+        } catch (err: any) {
+          // Best-effort: don't fail the response, but don't lose the signal either.
+          console.error(`[execution-learning] Failed to record log-only action for ${clientId}/${platform}:`, err.message || err);
+        }
 
         return res.json(logResult);
       }
 
-      const validActions: ExecutionActionType[] = [
-        "PAUSE_AD", "UNPAUSE_AD",
-        "PAUSE_ADSET", "UNPAUSE_ADSET",
-        "PAUSE_CAMPAIGN", "UNPAUSE_CAMPAIGN",
-        "SCALE_BUDGET_UP", "SCALE_BUDGET_DOWN",
-        "SET_BUDGET",
-      ];
-      if (!validActions.includes(action)) {
-        return res.status(400).json({
-          error: `Invalid action. Must be one of: ${[...validActions, ...logOnlyActions].join(", ")}`,
-        });
+      const isGoogle = platform === "google";
+
+      if (isGoogle) {
+        const validGoogleActions: GoogleExecutionActionType[] = [
+          "PAUSE_CAMPAIGN", "ENABLE_CAMPAIGN",
+          "PAUSE_AD_GROUP", "ENABLE_AD_GROUP",
+          "PAUSE_AD", "ENABLE_AD",
+          "SET_CAMPAIGN_BUDGET",
+          "SCALE_BUDGET_UP", "SCALE_BUDGET_DOWN",
+          "SET_CPC_BID",
+        ];
+        if (!validGoogleActions.includes(action)) {
+          return res.status(400).json({
+            error: `Invalid action. Must be one of: ${[...validGoogleActions, ...logOnlyActions].join(", ")}`,
+          });
+        }
+
+        const validGoogleEntityTypes = ["campaign", "ad_group", "ad"];
+        if (!validGoogleEntityTypes.includes(entityType)) {
+          return res.status(400).json({ error: "entityType must be campaign, ad_group, or ad" });
+        }
+      } else {
+        const validMetaActions: ExecutionActionType[] = [
+          "PAUSE_AD", "UNPAUSE_AD",
+          "PAUSE_ADSET", "UNPAUSE_ADSET",
+          "PAUSE_CAMPAIGN", "UNPAUSE_CAMPAIGN",
+          "SCALE_BUDGET_UP", "SCALE_BUDGET_DOWN",
+          "SET_BUDGET",
+        ];
+        if (!validMetaActions.includes(action)) {
+          return res.status(400).json({
+            error: `Invalid action. Must be one of: ${[...validMetaActions, ...logOnlyActions].join(", ")}`,
+          });
+        }
+
+        const validMetaEntityTypes = ["campaign", "adset", "ad"];
+        if (!validMetaEntityTypes.includes(entityType)) {
+          return res.status(400).json({ error: "entityType must be campaign, adset, or ad" });
+        }
       }
 
-      const validEntityTypes = ["campaign", "adset", "ad"];
-      if (!validEntityTypes.includes(entityType)) {
-        return res.status(400).json({ error: "entityType must be campaign, adset, or ad" });
+      let googleCreds: { customerId: string; credentials: GoogleAdsClientCredentials } | undefined;
+      let metaCreds: { accessToken: string; adAccountId: string } | undefined;
+      if (isGoogle) {
+        const resolved = await resolveGoogleExecCreds(clientId);
+        if ("error" in resolved) {
+          return res.status(400).json({ error: resolved.error });
+        }
+        googleCreds = resolved;
+      } else {
+        const resolved = await resolveMetaExecCreds(clientId);
+        if ("error" in resolved) {
+          return res.status(400).json({ error: resolved.error });
+        }
+        metaCreds = resolved;
       }
 
-      const execReq: ExecutionRequest = {
+      const execReq = {
         action,
         entityId,
         entityName: entityName || entityId,
         entityType,
+        clientId,
+        customerId: googleCreds?.customerId,
+        credentials: googleCreds?.credentials,
+        accessToken: metaCreds?.accessToken,
+        adAccountId: metaCreds?.adAccountId,
         params: params || {},
         requestedBy: "user",
         requestedByName: actorName,
         strategicCall,
-      };
+      } as ExecutionRequest | GoogleExecutionRequest;
 
-      const result = await executeAction(execReq);
+      const result = isGoogle
+        ? await executeGoogleAction(execReq as GoogleExecutionRequest)
+        : await executeAction(execReq as ExecutionRequest);
 
       // Record execution for learning engine (best-effort)
       if (result.success) {
@@ -1859,8 +2409,9 @@ export async function registerRoutes(
             strategicCall,
             actorName
           );
-        } catch (_) {
+        } catch (err: any) {
           // don't fail the response if learning recording fails
+          console.error(`[execution-learning] Failed to record execution for ${clientId}/${platform}:`, err.message || err);
         }
       }
 
@@ -2029,11 +2580,19 @@ export async function registerRoutes(
         });
       }
 
+      const googleCreds = await resolveGoogleExecCreds(clientId);
+      if ("error" in googleCreds) {
+        return res.status(400).json({ error: googleCreds.error });
+      }
+
       const execReq: GoogleExecutionRequest = {
         action,
         entityId,
         entityName: entityName || entityId,
         entityType,
+        clientId,
+        customerId: googleCreds.customerId,
+        credentials: googleCreds.credentials,
         params: params || {},
         requestedBy: "user",
         requestedByName: actorName,
@@ -2059,7 +2618,9 @@ export async function registerRoutes(
             strategicCall,
             actorName
           );
-        } catch (_) { /* best-effort */ }
+        } catch (err: any) {
+          console.error(`[execution-learning] Failed to record Google execution for ${clientId}:`, err.message || err);
+        }
       }
 
       res.json(result);
@@ -2071,6 +2632,7 @@ export async function registerRoutes(
   // Batch execute Google Ads actions
   app.post("/api/clients/:clientId/google/execute-batch", requireOwnership, async (req, res) => {
     try {
+      const { clientId } = req.params as Record<string, string>;
       const { actions } = req.body;
       const actorName = req.authUser?.name || req.authUser?.email || "User";
       if (!Array.isArray(actions) || actions.length === 0) {
@@ -2079,8 +2641,15 @@ export async function registerRoutes(
       if (actions.length > 20) {
         return res.status(400).json({ error: "Maximum 20 actions per batch" });
       }
+      const googleCreds = await resolveGoogleExecCreds(clientId);
+      if ("error" in googleCreds) {
+        return res.status(400).json({ error: googleCreds.error });
+      }
       const results = await executeGoogleBatch(actions.map((action: any) => ({
         ...action,
+        clientId,
+        customerId: googleCreds.customerId,
+        credentials: googleCreds.credentials,
         requestedBy: action.requestedBy || "user",
         requestedByName: actorName,
       })));
@@ -2093,7 +2662,8 @@ export async function registerRoutes(
   // Google Ads audit log
   app.get("/api/google-audit-log", requireAdmin, (_req, res) => {
     const limit = parseInt(_req.query.limit as string) || 50;
-    const log = getGoogleAuditLog(limit);
+    const clientId = (_req.query.clientId as string) || undefined;
+    const log = getGoogleAuditLog(limit, clientId);
     res.json(log);
   });
 
@@ -2101,6 +2671,10 @@ export async function registerRoutes(
   app.post("/api/clients/:clientId/google/auto-execute-now", requireOwnership, async (req, res) => {
     try {
       const { clientId } = req.params as Record<string, string>;
+      const googleCreds = await resolveGoogleExecCreds(clientId);
+      if ("error" in googleCreds) {
+        return res.status(400).json({ error: googleCreds.error });
+      }
       const data = await readAnalysisData(clientId, "google");
 
       const execRequests: GoogleExecutionRequest[] = [];
@@ -2114,6 +2688,7 @@ export async function registerRoutes(
             entityId: camp.campaign_id || camp.id,
             entityName: camp.campaign_name || camp.name || camp.campaign_id,
             entityType: "campaign",
+            clientId,
             params: {
               reason: `Auto-pause: ${(camp.auto_pause_reasons || []).join("; ") || "flagged for auto-pause"}`,
             },
@@ -2131,6 +2706,7 @@ export async function registerRoutes(
             entityId: ag.ad_group_id || ag.id,
             entityName: ag.ad_group_name || ag.name || ag.ad_group_id,
             entityType: "ad_group",
+            clientId,
             params: {
               reason: `Auto-pause: ${(ag.auto_pause_reasons || []).join("; ") || "flagged for auto-pause"}`,
             },
@@ -2149,6 +2725,7 @@ export async function registerRoutes(
               entityId: ad.ad_id || ad.id,
               entityName: ad.ad_name || ad.name || ad.ad_id,
               entityType: "ad",
+              clientId,
               params: {
                 reason: `Auto-pause: ${(ad.auto_pause_reasons || []).join("; ") || "flagged for auto-pause"}`,
               },
@@ -2167,7 +2744,11 @@ export async function registerRoutes(
         });
       }
 
-      const results = await executeGoogleBatch(execRequests);
+      const results = await executeGoogleBatch(execRequests.map((r) => ({
+        ...r,
+        customerId: googleCreds.customerId,
+        credentials: googleCreds.credentials,
+      })));
       res.json({
         results,
         total: results.length,
@@ -2190,6 +2771,11 @@ export async function registerRoutes(
         });
       }
 
+      const googleCreds = await resolveGoogleExecCreds(clientId);
+      if ("error" in googleCreds) {
+        return res.status(400).json({ error: googleCreds.error });
+      }
+
       const data = await readAnalysisData(clientId, "google");
       const campaigns: any[] = data.campaign_analysis || data.campaign_audit || [];
       const execRequests: GoogleExecutionRequest[] = [];
@@ -2204,6 +2790,7 @@ export async function registerRoutes(
                 entityId: w.campaign_id || w.id,
                 entityName: w.campaign_name || w.name || w.campaign_id,
                 entityType: "campaign",
+                clientId,
                 params: {
                   scalePercent,
                   reason: `Quick Action: Scale winner +${scalePercent}% (score ${w.health_score}, CPL ₹${w.cpl?.toFixed(0) || "N/A"})`,
@@ -2225,6 +2812,7 @@ export async function registerRoutes(
                 entityId: u.campaign_id || u.id,
                 entityName: u.campaign_name || u.name || u.campaign_id,
                 entityType: "campaign",
+                clientId,
                 params: {
                   reason: `Quick Action: Pause underperformer (score ${u.health_score}, ${u.auto_pause_reasons?.join("; ") || "UNDERPERFORMER"})`,
                 },
@@ -2245,6 +2833,7 @@ export async function registerRoutes(
                 entityId: ll.campaign_id || ll.id,
                 entityName: ll.campaign_name || ll.name || ll.campaign_id,
                 entityType: "campaign",
+                clientId,
                 params: {
                   scalePercent: 30,
                   reason: `Quick Action: Fix Learning Limited - scale budget +30%`,
@@ -2266,7 +2855,11 @@ export async function registerRoutes(
         });
       }
 
-      const results = await executeGoogleBatch(execRequests);
+      const results = await executeGoogleBatch(execRequests.map((r) => ({
+        ...r,
+        customerId: googleCreds.customerId,
+        credentials: googleCreds.credentials,
+      })));
       res.json({
         results,
         total: results.length,
@@ -2854,6 +3447,21 @@ export async function registerRoutes(
     }
   });
 
+  // Record a manual action performed outside the dashboard (e.g. directly in Ads Manager)
+  app.post("/api/execution-learning/manual-complete", requireAdmin, (req, res) => {
+    try {
+      const { clientId, platform, note } = req.body;
+      if (!clientId || !platform || !note || typeof note !== "string" || note.trim().length < 10) {
+        return res.status(400).json({ error: "clientId, platform, and a note of at least 10 characters are required" });
+      }
+      const actorName = req.authUser?.name || req.authUser?.email || "User";
+      const entry = recordManualCompletion(clientId, platform === "google" ? "google" : "meta", note.trim(), actorName);
+      res.json({ success: true, entry });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || "Failed to record manual completion" });
+    }
+  });
+
   // FEEDBACK LOOP: Save user feedback on recommendations
   app.post("/api/recommendations/feedback", requireAdmin, (req, res) => {
     const { text, context, status, clientId, platform } = req.body;
@@ -2970,6 +3578,44 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/clients/:clientId/:platform/available-funds", requireOwnership, async (req, res) => {
+    const { clientId, platform } = req.params as Record<string, string>;
+
+    try {
+      const cached = getCachedAvailableFunds(clientId, platform);
+      if (cached) {
+        return res.json(cached);
+      }
+
+      // No cached value yet (first request before the 30-min scheduler has run) —
+      // compute live once and seed the cache so subsequent loads are instant.
+      const credsStore = await loadCredentials();
+      const creds = credsStore[clientId];
+
+      if (platform === "meta") {
+        const meta = getValidMetaCreds(creds);
+        if (!meta) {
+          return res.status(400).json({ error: "Meta credentials are not configured for this client" });
+        }
+        const result = await computeMetaAvailableFunds(meta);
+        return res.json(setCachedAvailableFunds(clientId, "meta", result));
+      }
+
+      if (platform === "google") {
+        const google = getValidGoogleCreds(creds);
+        if (!google) {
+          return res.status(400).json({ error: "Google credentials are not configured for this client" });
+        }
+        const result = await computeGoogleAvailableFunds(google);
+        return res.json(setCachedAvailableFunds(clientId, "google", result));
+      }
+
+      return res.status(400).json({ error: `Unsupported platform: ${platform}` });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || "Failed to fetch available funds" });
+    }
+  });
+
   app.get("/api/clients/:clientId/:platform/check-new-entities", requireOwnership, async (req, res) => {
     const { clientId, platform } = req.params as Record<string, string>;
 
@@ -3052,10 +3698,31 @@ export async function registerRoutes(
     const user = await getUserById(userId);
     if (!user) return res.status(401).json({ error: "Auth required" });
 
-    if (user.role === "admin") {
-      // Admin runs agent for all clients
-      triggerManualRun();
-    } else {
+    // Optional scoping: a manual sync from the dashboard targets the client and
+    // platform the user is looking at. Without this the run walks every Meta client
+    // before it reaches the first Google client, so a Google sync appears to do
+    // nothing for the better part of an hour.
+    const requestedClientId = typeof req.body?.clientId === "string" ? req.body.clientId.trim() : "";
+    const requestedPlatformRaw = typeof req.body?.platform === "string" ? req.body.platform.trim().toLowerCase() : "";
+
+    // A caller that meant to scope the run but sent an empty/invalid clientId must not
+    // silently fall through to "run every account".
+    if (req.body && "clientId" in req.body && !requestedClientId) {
+      return res.status(400).json({ error: "clientId was provided but is empty" });
+    }
+    if (requestedPlatformRaw && requestedPlatformRaw !== "meta" && requestedPlatformRaw !== "google") {
+      return res.status(400).json({ error: `Unsupported platform '${requestedPlatformRaw}'` });
+    }
+    const platforms = requestedPlatformRaw ? [requestedPlatformRaw as AgentPlatform] : undefined;
+
+    let clientIds: string[] | undefined;
+
+    if (requestedClientId) {
+      if (!(await enforceOwnership(requestedClientId, user))) {
+        return res.status(403).json({ error: "Access denied. You do not own this client." });
+      }
+      clientIds = [requestedClientId];
+    } else if (user.role !== "admin") {
       // Member runs agent only for their own clients
       const registry = await loadRegistry();
       const ownedClientIds = registry
@@ -3065,10 +3732,28 @@ export async function registerRoutes(
       if (ownedClientIds.length === 0) {
         return res.status(400).json({ error: "You have no clients to sync" });
       }
-      triggerManualRun(ownedClientIds);
+      clientIds = ownedClientIds;
     }
 
-    res.json({ success: true, message: "Agent run triggered" });
+    // Don't report "sync started" when the same client/platform is already mid-run —
+    // the scheduler would silently drop it.
+    if (clientIds?.length === 1 && platforms?.length === 1 && isPlatformSyncing(clientIds[0], platforms[0])) {
+      return res.status(409).json({
+        error: `A ${platforms[0]} sync is already running for this client`,
+        alreadyRunning: true,
+      });
+    }
+
+    triggerManualRun({ clientIds, platforms });
+
+    res.json({
+      success: true,
+      message: "Agent run triggered",
+      scope: {
+        clientIds: clientIds ?? "all",
+        platforms: platforms ?? "all",
+      },
+    });
   });
 
   // ─── Command Parser Endpoint ──────────────────────────────────────

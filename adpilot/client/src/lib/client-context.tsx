@@ -327,10 +327,14 @@ export function ClientProvider({ children }: { children: ReactNode }) {
   }, [clients]);
 
   // ─── Auto-Sync on load if data is stale (> 12 hours) ───────────────
-  const [hasAutoSynced, setHasAutoSynced] = useState(false);
-  
+  // Tracked per client/platform: the run is scoped now, so switching to Google after
+  // Meta auto-synced still needs its own trigger.
+  const [autoSyncedKeys, setAutoSyncedKeys] = useState<string[]>([]);
+  const autoSyncKey = `${activeClientId}:${activePlatform}`;
+  const hasAutoSynced = autoSyncedKeys.includes(autoSyncKey);
+
   useEffect(() => {
-    if (hasAutoSynced || !syncState?.last_successful_fetch || syncState?.sync_status === "loading") return;
+    if (hasAutoSynced || !activeClientId || !syncState?.last_successful_fetch || syncState?.sync_status === "loading") return;
 
     const lastSync = new Date(syncState.last_successful_fetch).getTime();
     const now = Date.now();
@@ -338,13 +342,18 @@ export function ClientProvider({ children }: { children: ReactNode }) {
 
     // If data is older than 12 hours, trigger a background run
     if (hoursSinceSync > 12) {
-      setHasAutoSynced(true);
+      setAutoSyncedKeys((keys) => (keys.includes(autoSyncKey) ? keys : [...keys, autoSyncKey]));
       console.log(`[Auto-Sync] Data is ${hoursSinceSync.toFixed(1)}h old. Triggering background run...`);
-      apiRequest("POST", "/api/scheduler/run-now").catch(e => 
+      // Scoped to the client/platform whose staleness we just measured — an unscoped
+      // run would sync every Meta client first and never reach Google in time.
+      apiRequest("POST", "/api/scheduler/run-now", {
+        clientId: activeClientId,
+        platform: activePlatform,
+      }).catch(e =>
         console.error("[Auto-Sync] Failed to trigger background sync:", e)
       );
     }
-  }, [syncState?.last_successful_fetch, syncState?.sync_status, hasAutoSynced]);
+  }, [syncState?.last_successful_fetch, syncState?.sync_status, hasAutoSynced, autoSyncKey, activeClientId, activePlatform]);
 
   return (
     <ClientContext.Provider

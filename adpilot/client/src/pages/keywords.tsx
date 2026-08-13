@@ -30,6 +30,7 @@ import {
 import { formatINR, formatPct, truncate } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { DataTablePagination } from "@/components/data-table-pagination";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 
 interface KeywordEntry {
   keyword: string;
@@ -54,6 +55,7 @@ interface KeywordEntry {
 export default function KeywordsPage() {
   const { analysisData: data, isLoadingAnalysis: isLoading } = useClient();
   const [searchTerm, setSearchTerm] = useState("");
+  const debouncedSearchTerm = useDebouncedValue(searchTerm, 200);
   const [selectedCampaign, setSelectedCampaign] = useState("all");
   const [sortKey, setSortKey] = useState<keyof KeywordEntry>("spend");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
@@ -97,9 +99,10 @@ export default function KeywordsPage() {
   }, [keywords]);
 
   const filteredKeywords = useMemo(() => {
+    const q = debouncedSearchTerm.toLowerCase();
     let list = keywords.filter(k => {
-      const matchSearch = k.keyword.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                          k.campaign.toLowerCase().includes(searchTerm.toLowerCase());
+      const matchSearch = k.keyword.toLowerCase().includes(q) ||
+                          k.campaign.toLowerCase().includes(q);
       const matchCampaign = selectedCampaign === "all" || k.campaign === selectedCampaign;
       return matchSearch && matchCampaign;
     });
@@ -116,7 +119,7 @@ export default function KeywordsPage() {
     });
 
     return list;
-  }, [keywords, searchTerm, selectedCampaign, sortKey, sortDir]);
+  }, [keywords, debouncedSearchTerm, selectedCampaign, sortKey, sortDir]);
 
   const paginatedKeywords = useMemo(() => {
     return filteredKeywords.slice((page - 1) * pageSize, page * pageSize);

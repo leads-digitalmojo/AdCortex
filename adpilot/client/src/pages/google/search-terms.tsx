@@ -47,6 +47,12 @@ import { formatINR, formatPct, truncate } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
+
+// Accounts routinely return 3,000+ search terms. Rendering them all at once mounts
+// a tooltip, checkbox and two buttons per row — tens of thousands of components —
+// which is what made this page freeze. Render one page at a time instead.
+const ROWS_PER_PAGE = 100;
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -128,6 +134,11 @@ export default function GoogleSearchTermsPage() {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [ngramType, setNgramType] = useState<"1" | "2" | "3">("2");
   const [executedTerms, setExecutedTerms] = useState<Set<string>>(new Set());
+  const [page, setPage] = useState(1);
+
+  // Filtering 3,000 terms on every keystroke re-renders the whole table; wait for
+  // the user to stop typing first.
+  const debouncedSearch = useDebouncedValue(searchFilter, 250);
 
   // ─── Memoized Data ─────────────────────────────────────────────
   
@@ -189,8 +200,8 @@ export default function GoogleSearchTermsPage() {
     }
 
     // Filter by Search
-    if (searchFilter) {
-      const q = searchFilter.toLowerCase();
+    if (debouncedSearch) {
+      const q = debouncedSearch.toLowerCase();
       list = list.filter(
         (t) =>
           getTermText(t).toLowerCase().includes(q) ||
@@ -210,7 +221,20 @@ export default function GoogleSearchTermsPage() {
         ? String(aVal || "").localeCompare(String(bVal || ""))
         : String(bVal || "").localeCompare(String(aVal || ""));
     });
-  }, [stData, activeTab, selectedCampaign, searchFilter, sortKey, sortDir, getTermText]);
+  }, [stData, activeTab, selectedCampaign, debouncedSearch, sortKey, sortDir, getTermText]);
+
+  // ─── Pagination ────────────────────────────────────────────────
+  const totalPages = Math.max(1, Math.ceil(filteredTerms.length / ROWS_PER_PAGE));
+  const currentPage = Math.min(page, totalPages);
+  const pagedTerms = useMemo(
+    () => filteredTerms.slice((currentPage - 1) * ROWS_PER_PAGE, currentPage * ROWS_PER_PAGE),
+    [filteredTerms, currentPage]
+  );
+
+  // Any change to what's being listed sends the user back to the first page.
+  useEffect(() => {
+    setPage(1);
+  }, [activeTab, selectedCampaign, debouncedSearch, sortKey, sortDir]);
 
   const activeNgrams = useMemo(() => {
     if (!stData || activeTab !== "ngrams") return [];
@@ -228,8 +252,8 @@ export default function GoogleSearchTermsPage() {
       );
     }
 
-    if (searchFilter) {
-      const q = searchFilter.toLowerCase();
+    if (debouncedSearch) {
+      const q = debouncedSearch.toLowerCase();
       list = list.filter((n) => n.ngram.toLowerCase().includes(q));
     }
 
@@ -241,7 +265,7 @@ export default function GoogleSearchTermsPage() {
       const bVal = (b as any)[sortKey] || 0;
       return sortDir === "asc" ? aVal - bVal : bVal - aVal;
     });
-  }, [stData, activeTab, ngramType, searchFilter, sortKey, sortDir]);
+  }, [stData, activeTab, ngramType, debouncedSearch, sortKey, sortDir]);
 
   // ─── Block Dialog State ─────────────────────────────────────────
   const [blockDialogOpen, setBlockDialogOpen] = useState(false);
@@ -259,12 +283,15 @@ export default function GoogleSearchTermsPage() {
 
   // ─── Existing Negatives State ───────────────────────────────────
   const [existingNegatives, setExistingNegatives] = useState<NegativeKeyword[]>([]);
+  // A campaign can carry thousands of negatives — reveal them in chunks.
+  const [negativesLimit, setNegativesLimit] = useState(ROWS_PER_PAGE);
   const [negativesLoading, setNegativesLoading] = useState(false);
   const [negativesCampaignId, setNegativesCampaignId] = useState<string>("");
 
+  // "Visible" means the rows actually on screen — the current page.
   const getActiveTerms = useCallback(() => {
-    return filteredTerms;
-  }, [filteredTerms]);
+    return pagedTerms;
+  }, [pagedTerms]);
 
   function getNgrams(): NgramEntry[] {
     if (!stData) return [];
@@ -462,6 +489,7 @@ export default function GoogleSearchTermsPage() {
   const fetchExistingNegatives = useCallback(async (campaignId: string) => {
     if (!campaignId) return;
     setNegativesLoading(true);
+    setNegativesLimit(ROWS_PER_PAGE);
     try {
       const resp = await apiRequest("GET", `${apiBase}/google/negative-keywords?campaignId=${campaignId}`);
       const result = await resp.json();
@@ -771,7 +799,7 @@ export default function GoogleSearchTermsPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border/40">
-                  {filteredTerms.map((term, idx) => {
+                  {pagedTerms.map((term, idx) => {
                     const termText = getTermText(term);
                     const termKey = getTermKey(term);
                     const isExecuted = executedTerms.has(termKey);
@@ -935,6 +963,37 @@ export default function GoogleSearchTermsPage() {
                 </tbody>
               </table>
             </div>
+
+            {filteredTerms.length > 0 && (
+              <div className="flex items-center justify-between gap-4 flex-wrap px-6 py-4 border-t border-border/40">
+                <p className="text-xs font-semibold text-muted-foreground tabular-nums">
+                  Showing {((currentPage - 1) * ROWS_PER_PAGE) + 1}–{Math.min(currentPage * ROWS_PER_PAGE, filteredTerms.length)} of {filteredTerms.length.toLocaleString()} terms
+                </p>
+                {totalPages > 1 && (
+                  <div className="flex items-center gap-2">
+                    <button
+                      className="h-9 px-4 text-xs font-bold uppercase tracking-widest rounded-lg border border-border/60 bg-background hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                      onClick={() => setPage((p) => Math.max(1, p - 1))}
+                      disabled={currentPage <= 1}
+                      data-testid="button-terms-prev-page"
+                    >
+                      Previous
+                    </button>
+                    <span className="text-xs font-semibold text-muted-foreground tabular-nums px-2">
+                      Page {currentPage} of {totalPages}
+                    </span>
+                    <button
+                      className="h-9 px-4 text-xs font-bold uppercase tracking-widest rounded-lg border border-border/60 bg-background hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                      onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                      disabled={currentPage >= totalPages}
+                      data-testid="button-terms-next-page"
+                    >
+                      Next
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
           </CardContent>
         </Card>
       )}
@@ -1094,7 +1153,7 @@ export default function GoogleSearchTermsPage() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-border/40">
-                      {existingNegatives.map((neg, idx) => (
+                      {existingNegatives.slice(0, negativesLimit).map((neg, idx) => (
                         <tr key={`${neg.criterionId}-${idx}`} className="hover:bg-muted/10 transition-colors">
                           <td className="px-6 py-5 text-base font-semibold text-foreground italic">"{neg.keyword}"</td>
                           <td className="px-6 py-5">
@@ -1113,11 +1172,22 @@ export default function GoogleSearchTermsPage() {
                       ))}
                     </tbody>
                   </table>
-                  <div className="px-6 py-4 bg-muted/20 border-t border-border/60 flex justify-between items-center">
+                  <div className="px-6 py-4 bg-muted/20 border-t border-border/60 flex justify-between items-center gap-4 flex-wrap">
                     <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Repository Scan Complete</span>
-                    <span className="text-xs font-bold uppercase tracking-wider text-foreground">
-                      {existingNegatives.length} ACTIVE EXCLUSIONS
-                    </span>
+                    <div className="flex items-center gap-3">
+                      {existingNegatives.length > negativesLimit && (
+                        <button
+                          className="h-9 px-4 text-[10px] font-bold uppercase tracking-widest rounded-lg border border-border/60 bg-background hover:bg-muted transition-colors"
+                          onClick={() => setNegativesLimit((n) => n + ROWS_PER_PAGE)}
+                          data-testid="button-negatives-load-more"
+                        >
+                          Load {Math.min(ROWS_PER_PAGE, existingNegatives.length - negativesLimit)} more
+                        </button>
+                      )}
+                      <span className="text-xs font-bold uppercase tracking-wider text-foreground tabular-nums">
+                        {Math.min(negativesLimit, existingNegatives.length)} / {existingNegatives.length} ACTIVE EXCLUSIONS
+                      </span>
+                    </div>
                   </div>
                 </div>
               )}

@@ -219,6 +219,7 @@ function CommandInput({ clientId, platform, apiBase }: { clientId: string; platf
 
       // Execute one by one for proper tracking
       let succeeded = 0;
+      const failures: string[] = [];
       for (const action of actions) {
         try {
           await apiRequest("POST", `${apiBase}/execute-action`, {
@@ -226,12 +227,16 @@ function CommandInput({ clientId, platform, apiBase }: { clientId: string; platf
             strategicCall: `Command: ${commandText}`,
           });
           succeeded++;
-        } catch { /* continue */ }
+        } catch (err: any) {
+          failures.push(`${action.entityName || action.entityId}: ${err.message || "unknown error"}`);
+        }
       }
 
       toast({
         title: succeeded === actions.length ? "All Actions Executed" : "Partial Execution",
-        description: `${succeeded}/${actions.length} actions completed successfully`,
+        description: failures.length === 0
+          ? `${succeeded}/${actions.length} actions completed successfully`
+          : `${succeeded}/${actions.length} succeeded. Failed: ${failures.join("; ")}`,
         variant: succeeded === actions.length ? "default" : "destructive",
       });
 

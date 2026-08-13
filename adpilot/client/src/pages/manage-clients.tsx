@@ -74,6 +74,7 @@ function Field({
 }
 
 import { AddClientModal } from "@/components/add-client-modal";
+import { ImportMccModal } from "@/components/import-mcc-modal";
 
 // ─── Credentials Panel ───────────────────────────────────────────────
 
@@ -404,6 +405,7 @@ export default function ManageClientsPage() {
   const { clients, isLoadingClients } = useClient();
   const { isAdmin, user } = useAuth();
   const [showAdd, setShowAdd] = useState(false);
+  const [showImportMcc, setShowImportMcc] = useState(false);
   const [createdId, setCreatedId] = useState<string | null>(null);
 
   return (
@@ -418,9 +420,16 @@ export default function ManageClientsPage() {
             Add clients, configure their Meta &amp; Google Ads credentials, and enable platform integrations.
           </p>
         </div>
-        <Button size="sm" onClick={() => setShowAdd(true)} className="gap-1.5 shrink-0">
-          <Plus className="w-4 h-4" /> Add Client
-        </Button>
+        <div className="flex gap-2 shrink-0">
+          {isAdmin && (
+            <Button size="sm" variant="outline" onClick={() => setShowImportMcc(true)} className="gap-1.5">
+              <Globe className="w-4 h-4" /> Import from Google MCC
+            </Button>
+          )}
+          <Button size="sm" onClick={() => setShowAdd(true)} className="gap-1.5">
+            <Plus className="w-4 h-4" /> Add Client
+          </Button>
+        </div>
       </div>
 
       {/* Stats bar */}
@@ -486,6 +495,10 @@ export default function ManageClientsPage() {
             setCreatedId(id);
           }}
         />
+      )}
+
+      {showImportMcc && (
+        <ImportMccModal onClose={() => setShowImportMcc(false)} />
       )}
     </div>
   );

@@ -203,18 +203,34 @@ export function AppSidebar({ syncState, lastSynced }: AppSidebarProps) {
   const { toast } = useToast();
   const syncMutation = useMutation({
     mutationFn: async () => {
-      await apiRequest("POST", "/api/scheduler/run-now");
+      // Scope the run to what the sidebar is actually showing the sync state for.
+      // Omitting the client would run the agent for every account, and an unscoped
+      // run walks every Meta client before the first Google one — which is what made
+      // the Google sync look broken.
+      if (!activeClientId) throw new Error("Select a client before syncing.");
+      await apiRequest("POST", "/api/scheduler/run-now", {
+        clientId: activeClientId,
+        platform: activePlatform,
+      });
     },
     onSuccess: () => {
       toast({
         title: "Sync Started",
-        description: "Forcing a real-time data sync across platforms.",
+        description: `Fetching fresh ${activePlatform === "google" ? "Google" : "Meta"} data for ${activeClient?.name || "this client"}.`,
       });
     },
     onError: (error: Error) => {
+      // apiRequest surfaces failures as "<status>: <body>" — pull the message out.
+      let description = error.message;
+      const bodyStart = description.indexOf("{");
+      if (bodyStart !== -1) {
+        try {
+          description = JSON.parse(description.slice(bodyStart))?.error || description;
+        } catch { /* keep raw message */ }
+      }
       toast({
         title: "Sync Failed",
-        description: error.message,
+        description,
         variant: "destructive",
       });
     }
@@ -430,7 +446,7 @@ export function AppSidebar({ syncState, lastSynced }: AppSidebarProps) {
             <TooltipTrigger asChild>
               <button
                 onClick={() => syncMutation.mutate()}
-                disabled={syncMutation.isPending || syncState?.sync_status === "loading"}
+                disabled={!activeClientId || syncMutation.isPending || syncState?.sync_status === "loading"}
                 className="opacity-70 hover:opacity-100 hover:bg-accent/80 p-1.5 rounded-md transition-all absolute right-2 disabled:opacity-30 disabled:cursor-not-allowed"
               >
                 <RefreshCw className={cn("w-3.5 h-3.5 cursor-pointer", (syncMutation.isPending || syncState?.sync_status === "loading") && "animate-spin")} />

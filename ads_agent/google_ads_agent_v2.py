@@ -520,6 +520,132 @@ def is_competitor_term(term):
             return True, comp
     return False, None
 
+def fetch_existing_negative_keywords():
+    """Fetch all account's existing negative keywords, scoped by where they
+    actually apply — campaign-level negatives only block within that campaign,
+    ad-group-level negatives only block within that ad group. Shared negative
+    lists are account-wide by design, so those stay unscoped.
+
+    Getting this scoping right matters: an unscoped/global match would treat a
+    negative added to one campaign as blocking search terms in every other
+    campaign too — e.g. a campaign-level negative on the word "amara" (seen in
+    this account) would otherwise wrongly flag terms in the client's own
+    Amara-branded campaign as "already blocked" when they're actively serving.
+
+    Each negative is stored as an (text, match_type) tuple — match type changes
+    what "blocked" actually means (see matches_existing_negative).
+
+    Returns a dict: {"campaign": {campaign_id: {(text, match_type)}}, "ad_group": {ad_group_id: {(text, match_type)}}, "shared": {(text, match_type)}}
+    """
+    result = {"campaign": defaultdict(set), "ad_group": defaultdict(set), "shared": set()}
+
+    campaign_gaql = (
+        "SELECT campaign_criterion.keyword.text, campaign_criterion.keyword.match_type, campaign.id "
+        "FROM campaign_criterion "
+        "WHERE campaign_criterion.negative = TRUE AND campaign_criterion.type = 'KEYWORD'"
+    )
+    ad_group_gaql = (
+        "SELECT ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type, ad_group.id "
+        "FROM ad_group_criterion "
+        "WHERE ad_group_criterion.negative = TRUE AND ad_group_criterion.type = 'KEYWORD'"
+    )
+    shared_gaql = (
+        "SELECT shared_criterion.keyword.text, shared_criterion.keyword.match_type "
+        "FROM shared_criterion "
+        "WHERE shared_criterion.type = 'KEYWORD'"
+    )
+
+    try:
+        rows = get_report("campaign_criterion", query=campaign_gaql)
+        if isinstance(rows, list):
+            for r in rows:
+                crit = r.get("campaignCriterion", {})
+                text = crit.get("keyword", {}).get("text", "")
+                match_type = crit.get("keyword", {}).get("matchType", "BROAD")
+                cid = r.get("campaign", {}).get("id", "")
+                if text and cid:
+                    result["campaign"][cid].add((text.strip().lower(), match_type))
+    except Exception as e:
+        print(f"  [WARN] Failed to fetch negatives from campaign_criterion: {e}")
+
+    try:
+        rows = get_report("ad_group_criterion", query=ad_group_gaql)
+        if isinstance(rows, list):
+            for r in rows:
+                crit = r.get("adGroupCriterion", {})
+                text = crit.get("keyword", {}).get("text", "")
+                match_type = crit.get("keyword", {}).get("matchType", "BROAD")
+                agid = r.get("adGroup", {}).get("id", "")
+                if text and agid:
+                    result["ad_group"][agid].add((text.strip().lower(), match_type))
+    except Exception as e:
+        print(f"  [WARN] Failed to fetch negatives from ad_group_criterion: {e}")
+
+    try:
+        rows = get_report("shared_criterion", query=shared_gaql)
+        if isinstance(rows, list):
+            for r in rows:
+                crit = r.get("sharedCriterion", {})
+                text = crit.get("keyword", {}).get("text", "")
+                match_type = crit.get("keyword", {}).get("matchType", "BROAD")
+                if text:
+                    result["shared"].add((text.strip().lower(), match_type))
+    except Exception as e:
+        print(f"  [WARN] Failed to fetch negatives from shared_criterion: {e}")
+
+    return result
+
+
+def _negative_blocks_term(term_lower, neg_text, match_type):
+    """Match-type-aware check: does one negative keyword actually block this term?
+
+    - EXACT: only blocks the literal query itself (Google's "close variant"
+      handling isn't replicated here — this is a normalized equality check).
+    - PHRASE: blocks if the negative phrase appears as a contiguous word
+      sequence within the term (not just any substring — "amara" shouldn't
+      match inside "amaravati").
+    - BROAD (default/unknown): blocks if every word in the negative appears
+      somewhere in the term, in any order.
+    """
+    term_words = term_lower.split()
+    neg_words = neg_text.split()
+    if not neg_words:
+        return False
+
+    mt = (match_type or "BROAD").upper()
+
+    if mt == "EXACT":
+        return term_lower == neg_text
+
+    if mt == "PHRASE":
+        # Contiguous word-sequence match, not a raw substring match.
+        n = len(neg_words)
+        return any(term_words[i:i + n] == neg_words for i in range(len(term_words) - n + 1))
+
+    # BROAD (or unspecified): every negative word must appear as a whole word in the term.
+    term_word_set = set(term_words)
+    return all(w in term_word_set for w in neg_words)
+
+
+def matches_existing_negative(term, campaign_id, ad_group_id, existing_negatives):
+    """True if `term` is already blocked by a negative keyword scoped to this
+    term's own campaign/ad-group, or by an account-wide shared negative list —
+    respecting each negative's actual match type (see _negative_blocks_term).
+    """
+    term_lower = (term or "").lower().strip()
+    if not term_lower:
+        return False
+
+    applicable = set(existing_negatives.get("shared", set()))
+    applicable |= existing_negatives.get("campaign", {}).get(campaign_id, set())
+    applicable |= existing_negatives.get("ad_group", {}).get(ad_group_id, set())
+
+    for neg_text, match_type in applicable:
+        if _negative_blocks_term(term_lower, neg_text, match_type):
+            return True
+    return False
+
+
 def evaluate_competitor_relevance(competitor_name, leads, cost):
     """Evaluate if a competitor search term is worth keeping."""
     # Luxury real estate competitors in same price range are relevant
@@ -632,11 +758,20 @@ def calculate_daily_trends(rows):
         })
     return results
 
+# Impression-share-family metrics are ratios (0-1), not additive counts — summing
+# them across daily rows like a cost/impression total would be wrong. They need
+# an impression-weighted average instead.
+RATIO_METRICS = (
+    "searchImpressionShare", "searchBudgetLostImpressionShare", "searchRankLostImpressionShare",
+    "searchAbsoluteTopImpressionShare", "searchTopImpressionShare", "searchClickShare",
+    "searchExactMatchImpressionShare",
+)
+
 def aggregate_google_rows(rows, resource_name):
     """Aggregate daily Google Ads API rows into entity-level totals."""
     if not rows:
         return []
-        
+
     # resource_name is 'campaign', 'adGroup', or 'adGroupAd'
     id_field = "id"
     if resource_name == "adGroupAd":
@@ -646,29 +781,44 @@ def aggregate_google_rows(rows, resource_name):
         get_id = lambda r: r.get(resource_name, {}).get("id")
 
     aggregated = {}
-    
+    ratio_weighted_sums = defaultdict(lambda: defaultdict(float))
+    ratio_weight_totals = defaultdict(float)
+
     for row in rows:
         eid = get_id(row)
         if not eid:
             continue
-            
+
         if eid not in aggregated:
             # Initialize with first row's metadata
             aggregated[eid] = row.copy()
             # Reset metrics to zero so we can sum
             aggregated[eid]["metrics"] = {k: 0 for k in row.get("metrics", {}).keys()}
-        
+
         target_metrics = aggregated[eid]["metrics"]
         row_metrics = row.get("metrics", {})
-        
+        row_impressions = si(row_metrics.get("impressions"))
+
         # Sum numeric metrics
         for k, v in row_metrics.items():
             if isinstance(v, (int, float, str)) and str(v).replace(".","",1).isdigit():
                 if k in ("costMicros", "impressions", "clicks", "conversions", "allConversions", "videoViews"):
                     target_metrics[k] = (target_metrics.get(k) or 0) + (float(v) if "." in str(v) else int(v))
-        
+                elif k in RATIO_METRICS and row_impressions > 0:
+                    ratio_weighted_sums[eid][k] += float(v) * row_impressions
+
+        if row_impressions > 0:
+            ratio_weight_totals[eid] = ratio_weight_totals.get(eid, 0) + row_impressions
+
         # CTR, CPC, etc. should be re-calculated later by extract_* functions
-    
+
+    # Finalize impression-weighted averages for the ratio metrics collected above.
+    for eid, entity in aggregated.items():
+        weight = ratio_weight_totals.get(eid, 0)
+        if weight > 0:
+            for k, weighted_sum in ratio_weighted_sums.get(eid, {}).items():
+                entity["metrics"][k] = weighted_sum / weight
+
     return list(aggregated.values())
 
 def extract_campaign(row):
@@ -790,6 +940,8 @@ def extract_ad_group(row):
         "cpm": round(micros_to_inr(metrics.get("averageCpm")) or (safe_div(cost, impressions) * 1000 if impressions > 0 else 0), 2),
         "cvr": round(cvr, 2),
         "cpl": round(cpl, 2),
+        "search_impression_share": round(search_is * 100, 1) if search_is is not None else None,
+        "search_top_impression_share": round(top_is * 100, 1) if top_is is not None else None,
     }
 
 def extract_ad(row):
@@ -1138,8 +1290,9 @@ def analyze_account_pulse(campaigns, historical, daily_trends=None):
 
 # ━━━━━━━━━━━━━ MODULE 2: CAMPAIGN ANALYSIS + COST STACK ━━━━━━━━━
 
-def analyze_campaigns(campaigns, ad_groups):
+def analyze_campaigns(campaigns, ad_groups, quality_score_by_campaign=None):
     """Per-campaign deep analysis with cost stack diagnosis."""
+    quality_score_by_campaign = quality_score_by_campaign or {}
     results = []
     ag_by_campaign = defaultdict(list)
     for ag in ad_groups:
@@ -1152,19 +1305,26 @@ def analyze_campaigns(campaigns, ad_groups):
         ctype = c["campaign_type"]
         bench = get_benchmark_for_type(ctype)
         campaign_ags = ag_by_campaign.get(c["id"], [])
+        # Google reports Quality Score per-keyword, not per-ad-group; use the
+        # campaign's impression-weighted QS average as the best available proxy
+        # instead of a hardcoded neutral default.
+        campaign_qs = quality_score_by_campaign.get(c.get("name", ""), 5)
 
         # Score each ad group
         for ag in campaign_ags:
+            ag["quality_score"] = ag.get("quality_score") or campaign_qs
             ag_score_data = {
                 "cpl": ag.get("cpl", 0), "cvr": ag.get("cvr", 0),
                 "avg_cpc": ag.get("avg_cpc", 0), "ctr": ag.get("ctr", 0),
-                "quality_score": ag.get("quality_score", 5),
-                "impression_share": 0, "campaign_type": ctype,
+                "quality_score": ag["quality_score"],
+                "impression_share": ag.get("search_impression_share", 0) or 0,
+                "campaign_type": ctype,
             }
             ag_scored = scoring_engine.score_google_adgroup_module(ag_score_data, CPL_TARGET)
             ag["health_score"] = ag_scored["score"]
             ag["score"] = ag_scored["score"]
             ag["score_breakdown"] = ag_scored.get("breakdown", {})
+            ag["detailed_breakdown"] = ag_scored.get("detailed_breakdown", {})
             s = ag_scored["score"]
             ag["classification"] = "Excellent" if s >= 80 else "Good" if s >= 60 else "Average" if s >= 40 else "Poor"
 
@@ -1490,7 +1650,9 @@ def analyze_creative_health(ads, cpl_target):
             "classification": scoring["classification"],
             "should_pause": scoring["should_pause"],
             "health_signals": signals,
-            "scoring_type": scoring["scoring_type"]
+            "scoring_type": scoring["scoring_type"],
+            "score_breakdown": scoring.get("breakdown", {}),
+            "detailed_breakdown": scoring.get("detailed_breakdown", {}),
         })
         results.append(ad_res)
     
@@ -2826,6 +2988,19 @@ def analyze_quality_score(cadence_window=None):
         conversions = sf(metrics.get("conversions"))
         cpl = safe_div(cost, conversions) if conversions > 0 else 0
 
+        # Deterministic 4-bucket classification (L1 SOP rule) so every keyword gets
+        # a real bucket instead of the frontend's hardcoded "WATCH" fallback.
+        if impressions < 50:
+            classification = "NEW"
+        elif conversions == 0 and clicks >= 20 and cost > 1.5 * CPL_TARGET:
+            classification = "UNDERPERFORMER"
+        elif qs < SOP["qs_critical"]:
+            classification = "UNDERPERFORMER"
+        elif conversions > 0 and cpl <= CPL_TARGET * 1.1 and qs >= 6:
+            classification = "WINNER"
+        else:
+            classification = "WATCH"
+
         kw_entry = {
             "keyword_text": kw_data.get("text", ""),
             "match_type": kw_data.get("matchType", ""),
@@ -2842,6 +3017,7 @@ def analyze_quality_score(cadence_window=None):
             "conversions": conversions,
             "cost": round(cost, 2),
             "cpl": round(cpl, 2),
+            "classification": classification,
         }
 
         # Optimization actions
@@ -2898,9 +3074,12 @@ def analyze_quality_score(cadence_window=None):
             c_avg_qs = sum(cqs_vals) / len(cqs_vals) if cqs_vals else 0
             
         campaign_qs[cname] = {
+            "campaign_name": cname,
             "avg_qs": round(c_avg_qs, 1),
             "keyword_count": len(kws),
             "critical_count": sum(1 for q in cqs_vals if q < SOP["qs_critical"]),
+            "below_4": sum(1 for q in cqs_vals if q < 4),
+            "below_6": sum(1 for q in cqs_vals if q < 6),
         }
 
     return {
@@ -2915,6 +3094,8 @@ def analyze_quality_score(cadence_window=None):
         },
         "keywords": sorted(keywords, key=lambda k: k["quality_score"]),
         "by_campaign": campaign_qs,
+        # List form of by_campaign for consumers that need an array (e.g. frontend QS tab)
+        "per_campaign": sorted(campaign_qs.values(), key=lambda c: c["avg_qs"]),
     }
 
 
@@ -2949,14 +3130,25 @@ def analyze_search_terms(cadence_window=None):
             "junk_terms": [],
             "competitor_terms": [],
             "negative_suggestions": [],
+            "negative_candidates": [],
             "ngram_patterns": [],
         }
+
+    print("  Fetching existing negative keywords (campaign/ad group/shared lists)...")
+    existing_negatives = fetch_existing_negative_keywords()
+    existing_negatives_total = (
+        sum(len(v) for v in existing_negatives["campaign"].values())
+        + sum(len(v) for v in existing_negatives["ad_group"].values())
+        + len(existing_negatives["shared"])
+    )
+    print(f"  {existing_negatives_total} existing negative keywords found (scoped to their campaign/ad group) — will exclude already-blocked terms")
 
     all_terms = []
     high_value = []
     junk = []
     competitors = []
     negative_suggestions = []
+    already_negated_count = 0
 
     for r in rows:
         st_data = r.get("searchTermView", r.get("search_term_view", {}))
@@ -2978,7 +3170,13 @@ def analyze_search_terms(cadence_window=None):
 
         entry = {
             "term": term,
+            "search_term": term,
+            # "campaign"/"ad_group" are aliases for the frontend, which reads these
+            # short names (campaign_name/ad_group_name are kept too for other consumers).
+            "campaign": camp.get("name", ""),
             "campaign_name": camp.get("name", ""),
+            "campaign_id": camp.get("id", ""),
+            "ad_group": ag.get("name", ""),
             "ad_group_name": ag.get("name", ""),
             "impressions": impressions,
             "clicks": clicks,
@@ -2988,7 +3186,18 @@ def analyze_search_terms(cadence_window=None):
             "ctr": round(ctr, 2),
             "cvr": round(cvr, 2),
             "classification": "unknown",
+            "already_negated": False,
         }
+
+        # Already blocked by an existing negative keyword scoped to this exact
+        # campaign/ad group — don't re-flag it as junk/competitor/costly forever.
+        # Keep it in all_terms for auditing but skip it from the actionable buckets.
+        if matches_existing_negative(term, camp.get("id", ""), ag.get("id", ""), existing_negatives):
+            entry["classification"] = "already_negated"
+            entry["already_negated"] = True
+            already_negated_count += 1
+            all_terms.append(entry)
+            continue
 
         # Classify
         is_comp, comp_name = is_competitor_term(term)
@@ -2997,10 +3206,9 @@ def analyze_search_terms(cadence_window=None):
             junk.append(entry)
             if cost > 0:
                 negative_suggestions.append({
-                    "term": term,
+                    **entry,
                     "reason": "junk_pattern",
                     "cost_wasted": round(cost, 2),
-                    "impressions": impressions,
                 })
         elif is_comp:
             entry["classification"] = "competitor"
@@ -3010,10 +3218,9 @@ def analyze_search_terms(cadence_window=None):
             competitors.append(entry)
             if not worth_keeping and cost > SOP["search_term_bleed_cost"]:
                 negative_suggestions.append({
-                    "term": term,
+                    **entry,
                     "reason": f"competitor ({comp_name}), not converting",
                     "cost_wasted": round(cost, 2),
-                    "impressions": impressions,
                 })
         elif conversions > 0:
             entry["classification"] = "converting"
@@ -3022,18 +3229,18 @@ def analyze_search_terms(cadence_window=None):
         elif clicks > 5 and cost > 500 and conversions == 0:
             entry["classification"] = "non_converting_costly"
             negative_suggestions.append({
-                "term": term,
+                **entry,
                 "reason": f"non-converting, ₹{cost:.0f} spent, {clicks} clicks",
                 "cost_wasted": round(cost, 2),
-                "impressions": impressions,
             })
         else:
             entry["classification"] = "non_converting"
 
         all_terms.append(entry)
 
-    # N-gram analysis
-    ngram_patterns = _compute_ngrams(all_terms)
+    # N-gram analysis — exclude already-negated terms so patterns surface new,
+    # actionable signal instead of re-surfacing terms already blocked.
+    ngram_patterns = _compute_ngrams([t for t in all_terms if not t.get("already_negated")])
 
     # Sort negative suggestions by cost wasted
     negative_suggestions.sort(key=lambda x: x["cost_wasted"], reverse=True)
@@ -3048,11 +3255,16 @@ def analyze_search_terms(cadence_window=None):
         "total_cost": round(total_cost, 2),
         "junk_cost": round(total_junk_cost, 2),
         "junk_pct": round(junk_pct, 1),
+        "already_negated_count": already_negated_count,
+        "existing_negative_keywords_count": existing_negatives_total,
         "all_terms": sorted(all_terms, key=lambda t: t["cost"], reverse=True),
         "high_value_terms": sorted(high_value, key=lambda t: t["conversions"], reverse=True),
         "junk_terms": sorted(junk, key=lambda t: t["cost"], reverse=True),
         "competitor_terms": competitors,
         "negative_suggestions": negative_suggestions[:30],
+        # Alias for the frontend's "Junk / Negative" tab, which reads this key name;
+        # kept uncapped since the UI paginates client-side.
+        "negative_candidates": negative_suggestions,
         "ngram_patterns": ngram_patterns,
     }
 
@@ -3481,10 +3693,13 @@ def generate_recommendations(campaigns, account_pulse, auto_pause, playbooks_tri
     if search_terms and search_terms.get("negative_candidates"):
         for cand in search_terms["negative_candidates"][:5]:
             rec_id += 1
+            term_text = cand.get("term", cand.get("search_term", "unknown"))
+            cost_wasted = cand.get("cost_wasted", cand.get("cost", 0))
+            reason = cand.get("reason", "not converting")
             recs.append({
                 "id": f"R-{rec_id:03d}",
-                "title": f"Negative Keyword: {cand['term']}",
-                "description": f"Keyword '{cand['term']}' has NO conversions with {fmt_inr(cand['cost'])} cost. Score: {cand['score']}/10.",
+                "title": f"Negative Keyword: {term_text}",
+                "description": f"Search term '{term_text}' — {reason}. {fmt_inr(cost_wasted)} spent with no return.",
                 "category": "keyword",
                 "campaign": cand.get("campaign_name", "Global"),
                 "ice_score": ice_score(8, 9, 9),
@@ -3605,15 +3820,27 @@ def run_analysis(cadence="twice_weekly"):
     print(f"  Spend: {fmt_inr(account_pulse['total_spend'])} | Leads: {account_pulse['total_leads']} | CPL: {fmt_inr(account_pulse['overall_cpl'])}")
     print(f"  Pacing: Spend {account_pulse['mtd_pacing']['pacing_spend_pct']:.0f}% | Leads {account_pulse['mtd_pacing']['pacing_leads_pct']:.0f}%")
 
+    # 1b. Quality Score Analysis — computed early so real per-campaign/ad-group
+    # QS (not the neutral default of 5) feeds into campaign/ad-group health scoring below.
+    print("\n--- Module 11: Quality Score Analysis (hoisted) ---")
+    qs_analysis = analyze_quality_score(cadence_window=window)
+    qs_by_campaign_name = {
+        name: info.get("avg_qs", 5) for name, info in qs_analysis.get("by_campaign", {}).items()
+    }
+    qs_kw_count = len(qs_analysis.get("keywords", []))
+    print(f"  {qs_kw_count} keywords analyzed | {len(qs_by_campaign_name)} campaigns with QS data")
+
     # 3. Campaign Analysis
     print("\n--- Module 2: Campaign Analysis + Cost Stack ---")
-    campaign_analysis = analyze_campaigns(ds["campaigns"], ds["ad_groups"])
+    campaign_analysis = analyze_campaigns(ds["campaigns"], ds["ad_groups"], quality_score_by_campaign=qs_by_campaign_name)
     # Attach health scores from scoring engine to each campaign
     for ca in campaign_analysis:
+        campaign_qs = qs_by_campaign_name.get(ca.get("name", ""), ca.get("quality_score", 5))
+        ca["quality_score"] = campaign_qs
         score_data = {
             "cpl": ca.get("cpl", 0), "cvr": ca.get("cvr", 0),
             "avg_cpc": ca.get("avg_cpc", 0), "ctr": ca.get("ctr", 0),
-            "quality_score": ca.get("quality_score", 5),
+            "quality_score": campaign_qs,
             "impression_share": ca.get("search_impression_share", 0) or 0,
             "campaign_type": ca.get("campaign_type", "location"),
         }
@@ -3624,6 +3851,7 @@ def run_analysis(cadence="twice_weekly"):
         ca["health_score"] = scored["score"]
         ca["score"] = scored["score"]
         ca["score_breakdown"] = scored.get("breakdown", {})
+        ca["detailed_breakdown"] = scored.get("detailed_breakdown", {})
         ca["score_bands"] = scored.get("bands", {})
         s = scored["score"]
         ca["classification"] = "Excellent" if s >= 80 else "Good" if s >= 60 else "Average" if s >= 40 else "Poor"
@@ -3693,11 +3921,10 @@ def run_analysis(cadence="twice_weekly"):
         print(f"  [{ins['type']}] {ins['title']}")
 
     # 10b. Ad Group Restructuring Analysis
-    # 11. Quality Score Analysis (always)
-    print("\n--- Module 11: Quality Score Analysis ---")
-    qs_analysis = analyze_quality_score(cadence_window=window)
-    qs_kw_count = len(qs_analysis.get("keywords", []))
-    qs_avg = qs_analysis.get("account_average_qs", 0)
+    # 11. Quality Score Analysis — already computed earlier (Module 1b) so it can
+    # feed campaign/ad-group scoring; reused here rather than re-fetched.
+    qs_avg = qs_analysis.get("summary", {}).get("avg_qs", 0)
+    print(f"\n--- Module 11: Quality Score Analysis (reused) ---")
     print(f"  {qs_kw_count} keywords analyzed | Account avg QS: {qs_avg}")
     for alert in qs_analysis.get("alerts", [])[:3]:
         print(f"  ⚠ {alert}")
@@ -3705,7 +3932,7 @@ def run_analysis(cadence="twice_weekly"):
     # 12. Search Terms Analysis (always)
     print("\n--- Module 12: Search Terms Analysis ---")
     search_terms_analysis = analyze_search_terms(cadence_window=window)
-    st_total = search_terms_analysis.get("total_terms", 0)
+    st_total = search_terms_analysis.get("terms_reviewed", 0)
     st_neg = len(search_terms_analysis.get("negative_candidates", []))
     st_comp = len(search_terms_analysis.get("competitor_terms", []))
     print(f"  {st_total} search terms analyzed | {st_neg} negative candidates | {st_comp} competitor terms")

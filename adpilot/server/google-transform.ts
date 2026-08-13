@@ -249,6 +249,7 @@ function normalizeCampaign(c: any, benchmarks: any = {}): any {
     top_is: c.top_is ?? 0,
     click_share: c.click_share ?? 0,
     exact_match_is: c.exact_match_is ?? 0,
+    quality_score: c.quality_score ?? null,
     all_conversions: c.all_conversions || conversions,
     cost_stack: c.cost_stack || null,
     impression_share_analysis: c.impression_share_analysis || null,
@@ -600,6 +601,26 @@ function reconstructDetailed(breakdown: any, type: string, item: any = {}, targe
 
   const targetCpl = targets.google_cpl || targets.cpl || 850;
 
+  // actual/target lookups so the UI can show "Current" vs "Target" per metric.
+  // NOTE: this fallback is only used when the backend didn't attach its own
+  // detailed_breakdown — it approximates targets and may not match the exact
+  // per-metric targets used by the scoring engine.
+  const actualTarget: Record<string, { actual: any; target: any; unit?: string }> = {
+    cpl: { actual: item.cpl, target: targetCpl, unit: "currency" },
+    cpc: { actual: item.cpc ?? item.avg_cpc, target: 30, unit: "currency" },
+    cvr: { actual: item.cvr, target: 5.0, unit: "percent" },
+    ctr: { actual: item.ctr, target: 2.0, unit: "percent" },
+    qs: { actual: item.quality_score, target: 10, unit: "number" },
+    is: { actual: item.impression_share ?? item.search_impression_share, target: 60, unit: "percent" },
+    rsa: { actual: item.rsa_count, target: 3, unit: "number" },
+    cpm: { actual: item.cpm ?? item.avg_cpm, target: 120, unit: "currency" },
+    freq: { actual: item.frequency, target: 4.0, unit: "number" },
+    cr: { actual: item.cvr, target: 5.0, unit: "percent" },
+    ad_strength: { actual: item.ad_strength, target: "EXCELLENT", unit: "label" },
+    quality_score: { actual: item.quality_score, target: 10, unit: "number" },
+    expected_ctr: { actual: item.expected_ctr, target: "ABOVE_AVERAGE", unit: "label" },
+  };
+
   for (const k in w) {
     let score = breakdown[k];
 
@@ -611,10 +632,14 @@ function reconstructDetailed(breakdown: any, type: string, item: any = {}, targe
     }
 
     if (score !== undefined) {
+      const at = actualTarget[k] || {};
       detailed[k] = {
         score: Math.round(score * 10) / 10,
         weight: w[k],
-        contribution: Math.round((score * w[k] / 100) * 10) / 10
+        contribution: Math.round((score * w[k] / 100) * 10) / 10,
+        actual: at.actual,
+        target: at.target,
+        unit: at.unit,
       };
     }
   }
