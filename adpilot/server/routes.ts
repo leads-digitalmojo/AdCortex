@@ -1222,6 +1222,28 @@ export async function registerRoutes(
       credsStore[clientId as string] = existing;
       await saveCredentials(credsStore);
 
+      // Saving credentials for a platform is what makes that platform usable — but
+      // the client's platforms map carries its own `enabled` flag, and leaving it
+      // false hides the platform in the UI and blocks its sync/analysis queries.
+      // Turn it on for whichever platform was just configured.
+      const platformsMap = { ...((client.platforms || {}) as Record<string, any>) };
+      let platformsChanged = false;
+      for (const [platformKey, wasSubmitted] of [["meta", Boolean(meta)], ["google", Boolean(google)]] as const) {
+        if (!wasSubmitted) continue;
+        const current = platformsMap[platformKey];
+        if (current && current.enabled) continue;
+        platformsMap[platformKey] = {
+          label: current?.label || (platformKey === "meta" ? "Meta Ads" : "Google Ads"),
+          ...current,
+          enabled: true,
+        };
+        platformsChanged = true;
+      }
+      if (platformsChanged) {
+        await storage.updateClient(clientId as string, { platforms: platformsMap });
+        console.log(`[Credentials] Enabled platform(s) for '${clientId}': ${[meta && "meta", google && "google"].filter(Boolean).join(", ")}`);
+      }
+
       // Keep the legacy Python credentials file aligned for local scripts.
       if (google) {
         syncLegacyGoogleCredentialsFile(existing.google);

@@ -40,7 +40,7 @@ npm run build
 
 ### 5. Start with PM2
 ```bash
-pm2 start ecosystem.config.js --env production
+pm2 start ecosystem.config.cjs --env production
 pm2 save  # save PM2 process list
 ```
 
@@ -52,7 +52,9 @@ cd /path/to/AdCortex/adpilot
 git pull origin main
 npm ci
 npm run build
-pm2 restart adpilot --env production
+# --env only works against the ecosystem file. `pm2 restart adpilot --env production`
+# fails with "Using --env [env] without passing the ecosystem.config.js does not work".
+pm2 reload ecosystem.config.cjs --env production
 ```
 
 ### Option 2: Automated Deployment (GitHub Actions)
@@ -184,6 +186,10 @@ server {
     listen 80;
     server_name adcortex.digitalmojo.in;
 
+    # Creative Hub uploads images inline as base64. Nginx defaults to 1 MB and
+    # would return its own 413 before the request ever reaches Node.
+    client_max_body_size 25m;
+
     location / {
         proxy_pass http://localhost:3000;
         proxy_http_version 1.1;
@@ -191,6 +197,10 @@ server {
         proxy_set_header Connection 'upgrade';
         proxy_set_header Host $host;
         proxy_cache_bypass $http_upgrade;
+
+        # SSE (/api/events) drives live sync status — don't buffer it.
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
     }
 }
 ```

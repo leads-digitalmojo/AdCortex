@@ -203,29 +203,87 @@ function promptHistoryStatusClass(status: CreativeStatusTag) {
   return "border-amber-500/25 bg-amber-500/8 text-amber-700 dark:text-amber-400";
 }
 
+// Assets travel to the server inline as base64 inside the SOP JSON, and base64 adds
+// ~33% on top of the raw bytes. A phone-sized render therefore blows past any sane
+// body limit (a 72 MB PNG becomes ~96 MB of JSON). These are reference images for the
+// AI, not print masters, so downscale them before they ever leave the browser.
+const MAX_ASSET_EDGE_PX = 1600;
+const ASSET_JPEG_QUALITY = 0.82;
+const MAX_ASSET_BYTES = 4 * 1024 * 1024; // per asset, after compression
+
+function readFileAsDataUrl(file: File | Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+async function compressImageFile(file: File): Promise<{ dataUrl: string; size: number; type: string }> {
+  const original = await readFileAsDataUrl(file);
+
+  // SVGs and non-images can't go through canvas — pass them through untouched.
+  if (!file.type.startsWith("image/") || file.type === "image/svg+xml") {
+    return { dataUrl: original, size: file.size, type: file.type };
+  }
+
+  const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("Could not decode image"));
+    img.src = original;
+  });
+
+  const scale = Math.min(1, MAX_ASSET_EDGE_PX / Math.max(image.width, image.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(image.width * scale));
+  canvas.height = Math.max(1, Math.round(image.height * scale));
+
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return { dataUrl: original, size: file.size, type: file.type };
+
+  // JPEG has no alpha channel — paint white first so transparent PNGs don't go black.
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+  const compressed = canvas.toDataURL("image/jpeg", ASSET_JPEG_QUALITY);
+
+  // Tiny assets (icons, flat logos) can come out larger as JPEG — keep the original.
+  if (compressed.length >= original.length) {
+    return { dataUrl: original, size: file.size, type: file.type };
+  }
+
+  // base64 encodes 3 bytes per 4 chars.
+  const approxBytes = Math.round((compressed.length - (compressed.indexOf(",") + 1)) * 0.75);
+  return { dataUrl: compressed, size: approxBytes, type: "image/jpeg" };
+}
+
 async function filesToAssets(files: FileList | null, category: CreativeAsset["category"]) {
-  if (!files?.length) return [] as CreativeAsset[];
+  if (!files?.length) return { assets: [] as CreativeAsset[], rejected: [] as string[] };
   const items = Array.from(files);
 
-  return Promise.all(
-    items.map(
-      (file) =>
-        new Promise<CreativeAsset>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () =>
-            resolve({
-              id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
-              name: file.name,
-              type: file.type,
-              size: file.size,
-              dataUrl: String(reader.result || ""),
-              category,
-            });
-          reader.onerror = () => reject(reader.error);
-          reader.readAsDataURL(file);
-        }),
-    ),
-  );
+  const assets: CreativeAsset[] = [];
+  const rejected: string[] = [];
+
+  for (const file of items) {
+    const { dataUrl, size, type } = await compressImageFile(file);
+    if (size > MAX_ASSET_BYTES) {
+      rejected.push(file.name);
+      continue;
+    }
+    assets.push({
+      id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+      name: file.name,
+      type,
+      size,
+      dataUrl,
+      category,
+    });
+  }
+
+  return { assets, rejected };
 }
 
 function removeAsset(list: CreativeAsset[], assetId: string) {
@@ -445,11 +503,20 @@ export default function CreativesPage() {
     targetField: "logos" | "renders" | "winningCreatives",
   ) => {
     try {
-      const assets = await filesToAssets(event.target.files, category);
-      setSetupForm((current) => ({
-        ...current,
-        [targetField]: [...current[targetField], ...assets],
-      }));
+      const { assets, rejected } = await filesToAssets(event.target.files, category);
+      if (assets.length) {
+        setSetupForm((current) => ({
+          ...current,
+          [targetField]: [...current[targetField], ...assets],
+        }));
+      }
+      if (rejected.length) {
+        toast({
+          title: rejected.length === 1 ? "File too large" : `${rejected.length} files too large`,
+          description: `${rejected.join(", ")} — still over 4 MB after compression. Please resize before uploading.`,
+          variant: "destructive",
+        });
+      }
       event.target.value = "";
     } catch {
       toast({ title: "Upload failed", description: "One or more files could not be processed.", variant: "destructive" });

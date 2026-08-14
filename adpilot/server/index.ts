@@ -68,15 +68,21 @@ declare module "http" {
   }
 }
 
+// Creative Hub sends logos/renders/winning creatives inline as base64 in the SOP
+// payload, so the 100 KB express default rejects any real upload with a 413.
+// Assets are downscaled client-side; this is headroom for a batch of them.
+const JSON_BODY_LIMIT = process.env.JSON_BODY_LIMIT?.trim() || "25mb";
+
 app.use(
   express.json({
+    limit: JSON_BODY_LIMIT,
     verify: (req, _res, buf) => {
       req.rawBody = buf;
     },
   }),
 );
 
-app.use(express.urlencoded({ extended: false }));
+app.use(express.urlencoded({ extended: false, limit: JSON_BODY_LIMIT }));
 
 // Prevent search engine indexing for private app
 app.use((req, res, next) => {
@@ -140,6 +146,13 @@ app.use((req, res, next) => {
       return next(err);
     }
 
+    // body-parser's raw "request entity too large" tells the user nothing actionable.
+    if (err.type === "entity.too.large") {
+      return res.status(413).json({
+        message: `Upload is too large (limit ${JSON_BODY_LIMIT}). Remove or resize the largest images and try again.`,
+      });
+    }
+
     return res.status(status).json({ message });
   });
 
@@ -166,6 +179,10 @@ app.use((req, res, next) => {
     () => {
       log(`serving on port ${port}`);
       initScheduler();
+      // ecosystem.config.cjs sets `wait_ready: true`, so PM2 holds the reload until
+      // this signal arrives (or listen_timeout expires). Sending it makes reloads
+      // complete as soon as the server is actually accepting connections.
+      process.send?.("ready");
     },
   );
 })();

@@ -38,7 +38,7 @@ module.exports = {
       ref: "origin/main",
       repo: "https://github.com/leads-digitalmojo/AdCortex.git",
       path: "/home/ubuntu/apps/AdCortex",
-      "post-deploy": "npm ci && npm run build && pm2 reload ecosystem.config.js --env production",
+      "post-deploy": "npm ci && npm run build && pm2 reload ecosystem.config.cjs --env production",
       "pre-deploy-local": "echo 'Deploying to production...'",
     },
   },
