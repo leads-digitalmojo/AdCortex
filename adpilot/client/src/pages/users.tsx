@@ -20,6 +20,8 @@ import {
   ShieldCheck,
   AlertCircle,
   CheckCircle,
+  Building2,
+  Search,
 } from "lucide-react";
 
 // ─── Types ──────────────────────────────────────────────────────────
@@ -293,6 +295,190 @@ function UserModal({
 
 // ─── Main Users Page ────────────────────────────────────────────────
 
+// ─── Client Access Modal ────────────────────────────────────────────
+// Admins see every client by definition, so this is only offered for members.
+
+interface ClientOption {
+  id: string;
+  name: string;
+}
+
+function ClientAccessModal({
+  user,
+  onClose,
+}: {
+  user: User;
+  onClose: () => void;
+}) {
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const [selected, setSelected] = useState<Set<string> | null>(null);
+  const [filter, setFilter] = useState("");
+
+  const { data: clients = [], isLoading: loadingClients } = useQuery<ClientOption[]>({
+    queryKey: ["/api/clients"],
+    queryFn: async () => {
+      const res = await apiRequest("GET", "/api/clients");
+      if (!res.ok) throw new Error("Failed to load clients");
+      return res.json();
+    },
+  });
+
+  const { isLoading: loadingAccess } = useQuery({
+    queryKey: ["/api/access/users", user.id, "clients"],
+    queryFn: async () => {
+      const res = await apiRequest("GET", `/api/access/users/${user.id}/clients`);
+      if (!res.ok) throw new Error("Failed to load client access");
+      const data = await res.json();
+      // Seed the checkbox state once, from what's stored.
+      setSelected(new Set<string>(data.clientIds || []));
+      return data;
+    },
+  });
+
+  const save = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("PUT", `/api/access/users/${user.id}/clients`, {
+        clientIds: Array.from(selected ?? []),
+      });
+      if (!res.ok) throw new Error((await res.json()).error || "Failed to save client access");
+      return res.json();
+    },
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ["/api/access/users", user.id, "clients"] });
+      qc.invalidateQueries({ queryKey: ["/api/access/client-counts"] });
+      toast({
+        title: "Client access updated",
+        description: data.clientIds.length === 0
+          ? `${user.name} can no longer see any clients.`
+          : `${user.name} can now see ${data.clientIds.length} client${data.clientIds.length === 1 ? "" : "s"}.`,
+      });
+      onClose();
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const isLoading = loadingClients || loadingAccess || selected === null;
+  const chosen = selected ?? new Set<string>();
+  const visible = clients.filter((c) =>
+    c.name.toLowerCase().includes(filter.trim().toLowerCase()),
+  );
+
+  const toggle = (id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev ?? []);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm">
+      <div className="w-full max-w-lg mx-4 bg-background border border-border rounded-xl shadow-2xl">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+          <div>
+            <h2 className="text-base font-semibold flex items-center gap-2">
+              <Building2 className="w-4 h-4 text-primary" />
+              Client Access
+            </h2>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Choose what {user.name} sees on their dashboard
+            </p>
+          </div>
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="px-5 pt-4">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+            <Input
+              placeholder="Filter clients…"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              className="pl-9"
+            />
+          </div>
+          <div className="flex items-center justify-between mt-3 text-xs">
+            <span className="text-muted-foreground">
+              {chosen.size} of {clients.length} selected
+            </span>
+            <div className="flex gap-3">
+              <button
+                className="text-primary hover:underline disabled:opacity-40"
+                disabled={isLoading}
+                onClick={() => setSelected(new Set(clients.map((c) => c.id)))}
+              >
+                Select all
+              </button>
+              <button
+                className="text-primary hover:underline disabled:opacity-40"
+                disabled={isLoading}
+                onClick={() => setSelected(new Set())}
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="px-5 py-3 max-h-[45vh] overflow-y-auto">
+          {isLoading ? (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground py-6 justify-center">
+              <Loader2 className="w-4 h-4 animate-spin" /> Loading clients…
+            </div>
+          ) : visible.length === 0 ? (
+            <p className="text-sm text-muted-foreground py-6 text-center">
+              {clients.length === 0 ? "No clients exist yet." : "No clients match that filter."}
+            </p>
+          ) : (
+            <div className="space-y-1">
+              {visible.map((c) => (
+                <label
+                  key={c.id}
+                  className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-muted/50 cursor-pointer"
+                >
+                  <input
+                    type="checkbox"
+                    checked={chosen.has(c.id)}
+                    onChange={() => toggle(c.id)}
+                    className="w-4 h-4 accent-primary cursor-pointer"
+                  />
+                  <span className="text-sm flex-1">{c.name}</span>
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-between gap-3 px-5 py-4 border-t border-border">
+          <p className="text-xs text-muted-foreground">
+            {chosen.size === 0
+              ? "With none selected, their dashboard will be empty."
+              : "Applies the next time they load the dashboard."}
+          </p>
+          <div className="flex gap-2 shrink-0">
+            <Button variant="ghost" size="sm" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button size="sm" onClick={() => save.mutate()} disabled={isLoading || save.isPending}>
+              {save.isPending ? (
+                <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Saving…</>
+              ) : (
+                <><Save className="w-4 h-4 mr-2" /> Save</>
+              )}
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function UsersPage() {
   const { user: currentUser, isAdmin } = useAuth();
   const { toast } = useToast();
@@ -300,6 +486,7 @@ export default function UsersPage() {
 
   const [showModal, setShowModal] = useState(false);
   const [editingUser, setEditingUser] = useState<User | undefined>();
+  const [accessUser, setAccessUser] = useState<User | undefined>();
   const [searchTerm, setSearchTerm] = useState("");
 
   // Fetch users list
@@ -501,6 +688,16 @@ export default function UsersPage() {
                 </div>
 
                 <div className="flex gap-2">
+                  {u.role === "member" && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      title="Choose which clients this member can see"
+                      onClick={() => setAccessUser(u)}
+                    >
+                      <Building2 className="w-4 h-4" />
+                    </Button>
+                  )}
                   <Button
                     variant="ghost"
                     size="sm"
@@ -535,6 +732,13 @@ export default function UsersPage() {
           user={editingUser}
           onClose={handleCloseModal}
           onSaved={handleUserSaved}
+        />
+      )}
+
+      {accessUser && (
+        <ClientAccessModal
+          user={accessUser}
+          onClose={() => setAccessUser(undefined)}
         />
       )}
     </div>

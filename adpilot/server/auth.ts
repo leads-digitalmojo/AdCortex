@@ -7,8 +7,8 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import { db, pool } from "./db";
-import { users, clients, type User, type NewUser } from "@shared/schema";
-import { eq } from "drizzle-orm";
+import { users, clients, clientAssignments, type User, type NewUser } from "@shared/schema";
+import { and, eq } from "drizzle-orm";
 
 
 function toSingleString(val: unknown): string | undefined {
@@ -364,15 +364,121 @@ export function requireRole(allowedRoles: UserRole[]) {
   };
 }
 
+// ─── Client assignments ────────────────────────────────────────────
+// Admins choose which clients each member sees. Assignments live in the
+// client_assignments table, with a JSON file fallback mirroring how users are
+// stored, so access control still works when Postgres is unavailable.
+
+const ASSIGNMENTS_FILE = path.join(DATA_BASE, "access_client_assignments.json");
+
+type AssignmentFile = Record<string, string[]>; // userId -> clientIds
+
+function readAssignmentsFromFile(): AssignmentFile {
+  ensureDataDir();
+  if (!fs.existsSync(ASSIGNMENTS_FILE)) return {};
+  try {
+    const raw = JSON.parse(fs.readFileSync(ASSIGNMENTS_FILE, "utf-8"));
+    return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeAssignmentsToFile(next: AssignmentFile) {
+  ensureDataDir();
+  fs.writeFileSync(ASSIGNMENTS_FILE, JSON.stringify(next, null, 2));
+}
+
+/** Client ids explicitly assigned to a user. Empty for admins, who see everything. */
+export async function getAssignedClientIds(userId: string): Promise<string[]> {
+  try {
+    const rows = await db
+      .select({ clientId: clientAssignments.clientId })
+      .from(clientAssignments)
+      .where(eq(clientAssignments.userId, userId));
+    return rows.map((r) => r.clientId);
+  } catch {
+    return readAssignmentsFromFile()[userId] ?? [];
+  }
+}
+
+/** Replace a user's assignments with exactly `clientIds`. */
+export async function setAssignedClientIds(
+  userId: string,
+  clientIds: string[],
+  assignedBy?: string,
+): Promise<string[]> {
+  const unique = Array.from(new Set(clientIds.filter((id) => typeof id === "string" && id.trim())));
+  try {
+    await db.transaction(async (tx) => {
+      await tx.delete(clientAssignments).where(eq(clientAssignments.userId, userId));
+      if (unique.length) {
+        await tx.insert(clientAssignments).values(
+          unique.map((clientId) => ({ userId, clientId, assignedBy: assignedBy ?? null })),
+        );
+      }
+    });
+    return unique;
+  } catch {
+    const all = readAssignmentsFromFile();
+    if (unique.length) all[userId] = unique;
+    else delete all[userId];
+    writeAssignmentsToFile(all);
+    return unique;
+  }
+}
+
+/** Drop every assignment for a user — call when promoting to admin or deleting. */
+export async function clearAssignments(userId: string): Promise<void> {
+  await setAssignedClientIds(userId, []);
+}
+
+/**
+ * Client ids a user may see, or undefined when unrestricted (admins).
+ *
+ * A member sees clients assigned to them by an admin, plus any client they
+ * created themselves — so turning this feature on cannot take away access
+ * someone already had.
+ */
+export async function getVisibleClientIds(
+  user: Pick<SafeUser, "id" | "role">,
+): Promise<string[] | undefined> {
+  if (user.role === "admin") return undefined;
+
+  const assigned = await getAssignedClientIds(user.id);
+  let created: string[] = [];
+  try {
+    const rows = await db
+      .select({ id: clients.id })
+      .from(clients)
+      .where(eq(clients.createdBy, user.id));
+    created = rows.map((r) => r.id);
+  } catch {
+    // Registry fallback lives in storage; on DB failure assignments alone apply.
+  }
+  return Array.from(new Set([...assigned, ...created]));
+}
+
 /**
  * Validates if the authenticated user has permission to access a specific client.
  * Admin: Full access.
- * Member: Only clients they created.
+ * Member: clients assigned to them by an admin, or clients they created.
  */
 export async function enforceOwnership(clientId: string, user: Pick<SafeUser, "id" | "role">) {
   if (user.role === "admin") return true;
 
-  // For members, check if they are the creator of the client
+  try {
+    const [assignment] = await db
+      .select({ clientId: clientAssignments.clientId })
+      .from(clientAssignments)
+      .where(and(eq(clientAssignments.userId, user.id), eq(clientAssignments.clientId, clientId)))
+      .limit(1);
+    if (assignment) return true;
+  } catch {
+    if ((readAssignmentsFromFile()[user.id] ?? []).includes(clientId)) return true;
+  }
+
+  // Creators keep access to their own clients even without an assignment.
   try {
     const rows = await db.select().from(clients).where(eq(clients.id, clientId));
     const client = rows[0];
@@ -689,10 +795,67 @@ export async function setupAuth(app: Express) {
       return res.status(404).json({ error: "User not found" });
     }
 
+    // Admins are unrestricted, so per-client assignments are meaningless for
+    // them. Drop any left over from when this user was a member, so demoting
+    // them later doesn't silently restore a stale set of clients.
+    if (user.role !== "admin" && nextRole === "admin") {
+      await clearAssignments(user.id);
+    }
+
     if (isSelf && nextStatus !== "active") {
       req.session.authUserId = undefined;
     }
 
     res.json(toSafeUser(updated));
+  });
+
+  // ─── Per-member client access ────────────────────────────────────
+  // Admins decide which clients each member sees on their dashboard.
+
+  app.get("/api/access/users/:userId/clients", requireAdmin, async (req, res) => {
+    const user = await getUserById(String(req.params.userId));
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    if (user.role === "admin") {
+      return res.json({ userId: user.id, role: user.role, unrestricted: true, clientIds: [] });
+    }
+    const clientIds = await getAssignedClientIds(user.id);
+    res.json({ userId: user.id, role: user.role, unrestricted: false, clientIds });
+  });
+
+  app.put("/api/access/users/:userId/clients", requireAdmin, async (req, res) => {
+    const user = await getUserById(String(req.params.userId));
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    if (user.role === "admin") {
+      return res.status(400).json({
+        error: "Admins already see every client — change their role to member to restrict access",
+      });
+    }
+    if (!Array.isArray(req.body?.clientIds)) {
+      return res.status(400).json({ error: "clientIds must be an array of client ids" });
+    }
+
+    const requested = (req.body.clientIds as unknown[])
+      .filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+      .map((id) => id.trim());
+
+    // Reject ids that don't exist, rather than storing rows that silently grant
+    // nothing and can never be cleaned up.
+    let knownIds: Set<string>;
+    try {
+      const rows = await db.select({ id: clients.id }).from(clients);
+      knownIds = new Set(rows.map((r) => r.id));
+    } catch {
+      knownIds = new Set(requested); // DB unavailable — trust the caller
+    }
+    const unknown = requested.filter((id) => !knownIds.has(id));
+    if (unknown.length) {
+      return res.status(400).json({ error: `Unknown client id(s): ${unknown.join(", ")}` });
+    }
+
+    const clientIds = await setAssignedClientIds(user.id, requested, req.authUser?.id);
+    console.log(`[Auth] ${req.authUser?.email} set ${user.email} client access to ${clientIds.length} client(s)`);
+    res.json({ userId: user.id, role: user.role, unrestricted: false, clientIds });
   });
 }

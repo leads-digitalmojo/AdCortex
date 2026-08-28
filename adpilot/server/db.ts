@@ -122,6 +122,25 @@ export async function runMigrations() {
       );
     `);
 
+    // --- client_assignments table (admin-controlled per-member client access) ---
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS "client_assignments" (
+        "user_id" text NOT NULL,
+        "client_id" text NOT NULL REFERENCES "clients"("id") ON DELETE CASCADE,
+        "assigned_by" text,
+        "created_at" timestamp DEFAULT now()
+      );
+    `);
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS "uq_client_assignment"
+      ON "client_assignments" USING btree ("user_id","client_id");
+    `);
+    // Listing a member's clients filters on user_id, so index it separately.
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS "ix_client_assignment_user"
+      ON "client_assignments" USING btree ("user_id");
+    `);
+
     console.log("[DB] Migrations applied (bootstrap)");
   } catch (err) {
     console.error("[DB] Migration failed:", err);

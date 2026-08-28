@@ -5,14 +5,15 @@ import {
   apiConfigs, type ApiConfig
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, and, desc } from "drizzle-orm";
+import { eq, and, desc, inArray } from "drizzle-orm";
 import fs from "fs";
 import path from "path";
 
 export interface IStorage {
   // Clients
   getClient(id: string): Promise<Client | undefined>;
-  getAllClients(userId?: string): Promise<Client[]>;
+  /** @param allowedClientIds restrict the result to these ids; omit for all clients */
+  getAllClients(allowedClientIds?: string[]): Promise<Client[]>;
   getExecutionLogs(userId?: string, clientIds?: string[]): Promise<any[]>;
   createClient(client: any): Promise<Client>;
   updateClient(id: string, client: any): Promise<Client>;
@@ -39,11 +40,15 @@ export class DatabaseStorage implements IStorage {
     return client;
   }
 
-  async getAllClients(userId?: string): Promise<Client[]> {
+  async getAllClients(allowedClientIds?: string[]): Promise<Client[]> {
+    // An empty allow-list means "no clients", not "all clients" — a member with
+    // nothing assigned must see an empty dashboard, never the whole workspace.
+    if (allowedClientIds?.length === 0) return [];
+
     try {
-      let query = db.select().from(clients);
-      if (userId) {
-        return await query.where(eq(clients.createdBy, userId));
+      const query = db.select().from(clients);
+      if (allowedClientIds) {
+        return await query.where(inArray(clients.id, allowedClientIds));
       }
       return await query;
     } catch (err) {
@@ -57,8 +62,9 @@ export class DatabaseStorage implements IStorage {
       const raw = JSON.parse(fs.readFileSync(REGISTRY_FILE, "utf-8"));
       if (!Array.isArray(raw)) return [];
       let registry = raw as Client[];
-      if (userId) {
-        registry = registry.filter((c) => c.createdBy === userId);
+      if (allowedClientIds) {
+        const allowed = new Set(allowedClientIds);
+        registry = registry.filter((c) => allowed.has(c.id));
       }
       return registry;
     } catch (err) {

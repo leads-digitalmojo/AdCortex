@@ -42,6 +42,18 @@ export const clientCredentials = pgTable("client_credentials", {
   updatedAt: timestamp("updated_at").defaultNow(),
 });
 
+// Which clients a member can see. Admins are unrestricted and never appear here.
+// A member also keeps implicit access to any client they created themselves, so
+// assignments only ever widen what someone can reach.
+export const clientAssignments = pgTable("client_assignments", {
+  userId: text("user_id").notNull(),
+  clientId: text("client_id").notNull().references(() => clients.id, { onDelete: "cascade" }),
+  assignedBy: text("assigned_by"),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  uniquePair: uniqueIndex("uq_client_assignment").on(table.userId, table.clientId),
+}));
+
 export const creativeHubs = pgTable("creative_hubs", {
   clientId: text("client_id").primaryKey(),
   setup: jsonb("setup").default(null),
@@ -71,6 +83,7 @@ export type Client = typeof clients.$inferSelect;
 export type CreativeHub = typeof creativeHubs.$inferSelect;
 export type ActionLog = typeof actionLogs.$inferSelect;
 export type ClientCredential = typeof clientCredentials.$inferSelect;
+export type ClientAssignment = typeof clientAssignments.$inferSelect;
 
 export interface AnalysisPeriod {
   start: string;

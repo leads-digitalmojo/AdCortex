@@ -68,7 +68,10 @@ import {
 } from "./creative-hub";
 import { generateBiddingRecommendations } from "./bidding-intelligence";
 import { storage } from "./storage";
-import { requireAdmin, requireOwnership, requireAuth, getUserById, enforceOwnership } from "./auth";
+import {
+  requireAdmin, requireOwnership, requireAuth, getUserById, enforceOwnership,
+  getVisibleClientIds, getAssignedClientIds, setAssignedClientIds, clearAssignments,
+} from "./auth";
 import { insightsEngine } from "./intelligence-engine";
 import { getCache, setCache, invalidateCachePattern, cacheKey } from "./cache";
 import { computeMetaAvailableFunds, computeGoogleAvailableFunds, getCachedAvailableFunds, setCachedAvailableFunds } from "./available-funds";
@@ -702,7 +705,9 @@ export async function registerRoutes(
 
   app.get("/api/clients", requireAuth, async (req, res) => {
     const user = req.authUser!;
-    const registry = await storage.getAllClients(user.role === "admin" ? undefined : user.id);
+    // undefined = unrestricted (admin); an array scopes the dashboard to exactly
+    // the clients an admin assigned to this member, plus any they created.
+    const registry = await storage.getAllClients(await getVisibleClientIds(user));
 
     // Collect all platforms across the filtered clients to check DB presence
     const platformStatusPromises = registry.flatMap(c => {
@@ -763,9 +768,9 @@ export async function registerRoutes(
     const client = await storage.getClient(req.params.clientId as string);
     if (!client) return res.status(404).json({ error: "Client not found" });
 
-    // Access check: Admin can see everything, members only see their own
-    if (user.role === "member" && client.createdBy !== user.id) {
-      return res.status(403).json({ error: "Forbidden: You do not own this client" });
+    // Admins see everything; members see clients assigned to them or that they created.
+    if (!(await enforceOwnership(client.id, user))) {
+      return res.status(403).json({ error: "Forbidden: You do not have access to this client" });
     }
 
     res.json({
@@ -862,8 +867,8 @@ export async function registerRoutes(
     if (!existing) return res.status(404).json({ error: "Client not found" });
 
     // Ownership check
-    if (user.role === "member" && existing.createdBy !== user.id) {
-      return res.status(403).json({ error: "Forbidden: You do not own this client" });
+    if (!(await enforceOwnership(existing.id, user))) {
+      return res.status(403).json({ error: "Forbidden: You do not have access to this client" });
     }
 
     const { name, shortName, project, location, targetLocations, enableMeta, enableGoogle, targets } = req.body;
@@ -902,8 +907,8 @@ export async function registerRoutes(
     if (!existing) return res.status(404).json({ error: "Client not found" });
 
     // Ownership check
-    if (user.role === "member" && existing.createdBy !== user.id) {
-      return res.status(403).json({ error: "Forbidden: You do not own this client" });
+    if (!(await enforceOwnership(existing.id, user))) {
+      return res.status(403).json({ error: "Forbidden: You do not have access to this client" });
     }
 
     await storage.deleteClient(clientId);
@@ -923,8 +928,8 @@ export async function registerRoutes(
     if (!client) return res.status(404).json({ error: "Client not found" });
 
     // Access check
-    if (user.role === "member" && client.createdBy !== user.id) {
-      return res.status(403).json({ error: "Forbidden: You do not own this client" });
+    if (!(await enforceOwnership(client.id, user))) {
+      return res.status(403).json({ error: "Forbidden: You do not have access to this client" });
     }
 
     const credsStore = await loadCredentials();
@@ -964,8 +969,8 @@ export async function registerRoutes(
       const clientId = req.params.clientId as string;
       const client = await storage.getClient(clientId);
       if (!client) return res.status(404).json({ error: "Client not found" });
-      if (user.role === "member" && client.createdBy !== user.id) {
-        return res.status(403).json({ error: "Forbidden: You do not own this client" });
+      if (!(await enforceOwnership(client.id, user))) {
+        return res.status(403).json({ error: "Forbidden: You do not have access to this client" });
       }
 
       const credsStore = await loadCredentials();
@@ -1188,8 +1193,8 @@ export async function registerRoutes(
       }
 
       // Access check
-      if (user.role === "member" && client.createdBy !== user.id) {
-        return res.status(403).json({ error: "Forbidden: You do not own this client" });
+      if (!(await enforceOwnership(client.id, user))) {
+        return res.status(403).json({ error: "Forbidden: You do not have access to this client" });
       }
 
       const { meta, google } = req.body;
@@ -3746,16 +3751,12 @@ export async function registerRoutes(
       }
       clientIds = [requestedClientId];
     } else if (user.role !== "admin") {
-      // Member runs agent only for their own clients
-      const registry = await loadRegistry();
-      const ownedClientIds = registry
-        .filter((c) => c.createdBy === user.id)
-        .map((c) => c.id);
-
-      if (ownedClientIds.length === 0) {
+      // A member syncs exactly the clients they can see — same rule as the dashboard.
+      const visible = await getVisibleClientIds(user);
+      if (!visible || visible.length === 0) {
         return res.status(400).json({ error: "You have no clients to sync" });
       }
-      clientIds = ownedClientIds;
+      clientIds = visible;
     }
 
     // Don't report "sync started" when the same client/platform is already mid-run —
