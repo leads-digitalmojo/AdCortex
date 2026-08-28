@@ -249,7 +249,12 @@ export function AppSidebar({ syncState, lastSynced }: AppSidebarProps) {
             className="w-10 h-10 rounded-[10px] shadow-sm shrink-0 object-fill p-1"
           />
           <div className="grid gap-1 leading-none">
-            <p className="text-lg font-bold tracking-[0.0.5em] leading-none">Mojo AdCortex</p>
+            {/* Keep tracking-normal. This was an arbitrary tracking value with a
+                doubled decimal point (0.0.5em), which Tailwind silently compiled to
+                letter-spacing:0.5em — wrapping the title onto two lines in the
+                production build while dev looked fine. Don't reintroduce it.
+                NB: the bad class is not written out here, or the scanner re-emits it. */}
+            <p className="text-lg font-bold tracking-normal leading-none whitespace-nowrap">Mojo AdCortex</p>
             <p className="text-xs font-semibold uppercase tracking-[0.10em] text-muted-foreground leading-none">By Digital Mojo</p>
           </div>
         </div>
