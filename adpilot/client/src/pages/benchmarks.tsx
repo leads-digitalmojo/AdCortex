@@ -7,7 +7,6 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
 import { useClient, benchmarksQueryKey } from "@/lib/client-context";
-import { useAuth } from "@/lib/auth-context";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { formatINR, formatPct } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -317,7 +316,6 @@ function formatMetricValue(value: number | undefined, format: "pct" | "inr" | "n
 
 function GoogleBenchmarks() {
   const { analysisData: data, isLoadingAnalysis, activeClientId, benchmarks, isLoadingBenchmarks } = useClient();
-  const { isAdmin } = useAuth();
   const { toast } = useToast();
   const [form, setForm] = useState<Record<string, any>>({});
   const [activeTab, setActiveTab] = useState<"targets" | "actuals" | "mtd">("targets");
@@ -491,18 +489,13 @@ function GoogleBenchmarks() {
 
 
 
-      {/* Save Button */}
-      {isAdmin ? (
-        <Button className="w-full bg-primary hover:bg-primary/90 text-primary-foreground font-semibold gap-2" onClick={handleSave} disabled={saveMutation.isPending}>
-          {saveMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-          Save Google Benchmarks
-        </Button>
-      ) : (
-        <div className="p-3 rounded-lg bg-muted/30 border border-border/30 flex items-center justify-center gap-2">
-          <Shield className="w-4 h-4 text-muted-foreground" />
-          <span className="text-xs text-muted-foreground">Benchmarks are read-only for standard users</span>
-        </div>
-      )}
+      {/* Save Button — benchmarks belong to the client, not the workspace, so
+          anyone who can reach this client may tune them. The server is the
+          authority: PUT /api/clients/:clientId/benchmarks is requireOwnership. */}
+      <Button className="w-full bg-primary hover:bg-primary/90 text-primary-foreground font-semibold gap-2" onClick={handleSave} disabled={saveMutation.isPending}>
+        {saveMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+        Save Google Benchmarks
+      </Button>
 
       {/* Info card */}
       <Card className="bg-muted/20 border-border/50">
@@ -583,7 +576,6 @@ function EditableSection({
 
 function MetaBenchmarks() {
   const { activeClientId, benchmarks, isLoadingBenchmarks } = useClient();
-  const { isAdmin } = useAuth();
   const { toast } = useToast();
   const [form, setForm] = useState<Record<string, any>>({});
   const [locations, setLocations] = useState("");
@@ -715,27 +707,20 @@ function MetaBenchmarks() {
       )}
 
 
-      {/* Save Button */}
-      {isAdmin ? (
-        <Button
-          className="w-full bg-primary hover:bg-primary/90 text-primary-foreground font-semibold gap-2"
-          onClick={handleSave}
-          disabled={saveMutation.isPending}
-          data-testid="button-save-benchmarks"
-        >
-          {saveMutation.isPending ? (
-            <Loader2 className="w-4 h-4 animate-spin" />
-          ) : (
-            <Save className="w-4 h-4" />
-          )}
-          Save All Benchmarks
-        </Button>
-      ) : (
-        <div className="p-3 rounded-lg bg-muted/30 border border-border/30 flex items-center justify-center gap-2">
-          <Shield className="w-4 h-4 text-muted-foreground" />
-          <span className="text-xs text-muted-foreground">Benchmarks are read-only for standard users</span>
-        </div>
-      )}
+      {/* Save Button — see the note on the Google tab: per-client, server-enforced. */}
+      <Button
+        className="w-full bg-primary hover:bg-primary/90 text-primary-foreground font-semibold gap-2"
+        onClick={handleSave}
+        disabled={saveMutation.isPending}
+        data-testid="button-save-benchmarks"
+      >
+        {saveMutation.isPending ? (
+          <Loader2 className="w-4 h-4 animate-spin" />
+        ) : (
+          <Save className="w-4 h-4" />
+        )}
+        Save All Benchmarks
+      </Button>
 
       {/* Info card */}
       <Card className="bg-muted/20 border-border/50">

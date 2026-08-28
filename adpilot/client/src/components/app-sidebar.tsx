@@ -196,9 +196,12 @@ export function AppSidebar({ syncState, lastSynced }: AppSidebarProps) {
   const { isAdmin } = useAuth();
 
   const platformItems = activePlatform === "google" ? googleNavItems : metaNavItems;
+  // Benchmarks are per-client, and the routes behind them are requireOwnership,
+  // so a member only ever reaches benchmarks for clients assigned to them.
+  const MEMBER_ADMIN_ITEMS = ["Settings", "Manage Clients", "Benchmarks"];
   const adminItems = isAdmin
     ? adminNavItems
-    : adminNavItems.filter(i => i.title === "Settings" || i.title === "Manage Clients");
+    : adminNavItems.filter(i => MEMBER_ADMIN_ITEMS.includes(i.title));
 
   const { toast } = useToast();
   const syncMutation = useMutation({
