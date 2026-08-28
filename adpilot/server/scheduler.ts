@@ -357,7 +357,12 @@ async function loadClientsWithCredentials(): Promise<Array<{
 
 // How many client syncs run at once. Each is a separate Python process, so this
 // is bounded by the box's cores, not by network. Override with SYNC_CONCURRENCY.
-const SYNC_CONCURRENCY = Math.max(1, Number(process.env.SYNC_CONCURRENCY) || 4);
+//
+// Read at call time, not module load: index.ts imports this module before it
+// calls dotenv.config(), so anything read at module scope misses .env entirely.
+function syncConcurrency(): number {
+  return Math.max(1, Number(process.env.SYNC_CONCURRENCY) || 4);
+}
 
 const CADENCE_FILES = [
   { file: "analysis.json", cadence: "twice_weekly" },
@@ -509,7 +514,7 @@ async function runAgent(options: AgentRunOptions = {}): Promise<void> {
 
     for (const leg of legs) {
       if (leg.clients.length === 0) continue;
-      const concurrency = Math.min(SYNC_CONCURRENCY, leg.clients.length);
+      const concurrency = Math.min(syncConcurrency(), leg.clients.length);
       log(
         `Scheduler: ${leg.platform} leg — ${leg.clients.length} client(s), ${concurrency} at a time`,
         "scheduler",
