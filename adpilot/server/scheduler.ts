@@ -81,6 +81,11 @@ export interface AgentRunOptions {
 const inFlightSyncs = new Set<string>();
 const syncKey = (clientId: string, platform: string) => `${clientId}:${platform}`;
 
+/** True while an unscoped (all-clients) run is in progress. */
+export function isFullRunActive(): boolean {
+  return activeRuns > 0;
+}
+
 export function isPlatformSyncing(clientId: string, platform: string): boolean {
   return inFlightSyncs.has(syncKey(clientId, platform));
 }
@@ -350,6 +355,97 @@ async function loadClientsWithCredentials(): Promise<Array<{
   }
 }
 
+// How many client syncs run at once. Each is a separate Python process, so this
+// is bounded by the box's cores, not by network. Override with SYNC_CONCURRENCY.
+const SYNC_CONCURRENCY = Math.max(1, Number(process.env.SYNC_CONCURRENCY) || 4);
+
+const CADENCE_FILES = [
+  { file: "analysis.json", cadence: "twice_weekly" },
+  { file: "analysis_daily.json", cadence: "daily" },
+  { file: "analysis_weekly.json", cadence: "weekly" },
+  { file: "analysis_biweekly.json", cadence: "biweekly" },
+  { file: "analysis_monthly.json", cadence: "monthly" },
+];
+
+/** Run `worker` over `items`, at most `limit` in flight. Never rejects. */
+async function runWithConcurrency<T>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<void>,
+): Promise<void> {
+  let cursor = 0;
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const item = items[cursor++];
+      await worker(item);
+    }
+  });
+  await Promise.all(runners);
+}
+
+/** Sync one client on one platform: run the agent, record state, persist snapshots. */
+async function syncClientPlatform(
+  client: { id: string; googleCreds?: Record<string, string>; metaCreds?: Record<string, string> },
+  platform: AgentPlatform,
+  agentPath: string,
+  pythonPath: string,
+): Promise<void> {
+  const label = platform === "google" ? "Google" : "Meta";
+  const creds = platform === "google" ? client.googleCreds : client.metaCreds;
+
+  log(`Scheduler: Running ${label} Ads Agent for client '${client.id}'...`, "scheduler");
+  inFlightSyncs.add(syncKey(client.id, platform));
+  setPlatformSyncState(client.id, platform, {
+    last_synced_at: new Date().toISOString(),
+    sync_status: "loading",
+  });
+
+  try {
+    await execFileAsync(pythonPath, [agentPath, "--client", client.id, "--multi-cadence"], {
+      cwd: ADS_AGENT_DIR,
+      timeout: 600000,
+      env: { ...process.env, ...creds },
+    });
+
+    setPlatformSyncState(client.id, platform, {
+      last_synced_at: new Date().toISOString(),
+      last_successful_fetch: getLatestAnalysisTimestamp(client.id, platform),
+      sync_status: "success",
+    });
+
+    // PERSIST TO DB: capture every cadence file the agent wrote and push to Postgres
+    const dir = path.join(DATA_BASE, "clients", client.id, platform);
+    for (const { file, cadence } of CADENCE_FILES) {
+      const filePath = path.join(dir, file);
+      if (!fs.existsSync(filePath)) continue;
+      try {
+        const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+        await saveAnalysisSnapshot(client.id, platform, data, cadence);
+      } catch (e) {
+        log(`[DB Push] Failed to persist ${label} ${cadence} snapshot for ${client.id}: ${e}`, "scheduler");
+      }
+    }
+
+    if (platform === "google") {
+      try {
+        await generateBiddingRecommendations(client.id);
+      } catch (e) {
+        log(`[Bidding] Failed for ${client.id}: ${e}`, "scheduler");
+      }
+    }
+
+    log(`Scheduler: ${label} agent completed for client '${client.id}'`, "scheduler");
+  } catch (error: any) {
+    setPlatformSyncState(client.id, platform, {
+      last_synced_at: new Date().toISOString(),
+      sync_status: "failed",
+    });
+    log(`Scheduler: ${label} agent failed for client '${client.id}': ${error.message}`, "scheduler");
+  } finally {
+    inFlightSyncs.delete(syncKey(client.id, platform));
+  }
+}
+
 async function runAgent(options: AgentRunOptions = {}): Promise<void> {
   const { clientIds, platforms } = options;
   const isScoped = Boolean(clientIds?.length || platforms?.length);
@@ -385,6 +481,13 @@ async function runAgent(options: AgentRunOptions = {}): Promise<void> {
       log(`Scheduler: Scoped run for platforms: ${platforms.join(", ")}`, "scheduler");
     }
 
+    // Both platforms run the same per-client pipeline, so drive them through one
+    // worker and a concurrency pool. Each client is an independent Python process
+    // with its own credentials — nothing is shared but platformSyncState, which is
+    // keyed per client and flushed with a synchronous write, so it can't interleave.
+    const pythonPath = resolvePythonPath();
+
+    const legs: Array<{ platform: AgentPlatform; agent: string; clients: typeof clients }> = [];
     if (fs.existsSync(metaAgent) && wantsPlatform("meta")) {
       const metaClients = clients
         .filter((c) => c.metaCreds?.META_ACCESS_TOKEN)
@@ -392,64 +495,8 @@ async function runAgent(options: AgentRunOptions = {}): Promise<void> {
       if (metaClients.length === 0) {
         log("Scheduler: No Meta clients with credentials configured — skipping Meta agent", "scheduler");
       }
-      for (const client of metaClients) {
-        log(`Scheduler: Running Meta Ads Agent for client '${client.id}'...`, "scheduler");
-        const syncStartedAt = new Date().toISOString();
-        inFlightSyncs.add(syncKey(client.id, "meta"));
-        setPlatformSyncState(client.id, "meta", {
-          last_synced_at: syncStartedAt,
-          sync_status: "loading",
-        });
-        try {
-          // Explicitly pass env variables to ensure agent has access tokens
-          const pythonPath = resolvePythonPath();
-          log(`Scheduler: Executing Meta agent with ${pythonPath} for client ${client.id}`, "scheduler");
-          
-          await execFileAsync(pythonPath, [metaAgent, "--client", client.id, "--multi-cadence"], {
-            cwd: ADS_AGENT_DIR,
-            timeout: 600000,
-            env: { ...process.env, ...client.metaCreds },
-          });
-
-          const syncCompletedAt = new Date().toISOString();
-          setPlatformSyncState(client.id, "meta", {
-            last_synced_at: syncCompletedAt,
-            last_successful_fetch: getLatestAnalysisTimestamp(client.id, "meta"),
-            sync_status: "success",
-          });
-
-          // PERSIST TO DB: Capture all cadence JSON files and push to Postgres
-          const metaDir = path.join(DATA_BASE, "clients", client.id, "meta");
-          const cadenceFiles = [
-            { file: "analysis.json", cadence: "twice_weekly" },
-            { file: "analysis_daily.json", cadence: "daily" },
-            { file: "analysis_weekly.json", cadence: "weekly" },
-            { file: "analysis_biweekly.json", cadence: "biweekly" },
-            { file: "analysis_monthly.json", cadence: "monthly" },
-          ];
-          for (const { file, cadence } of cadenceFiles) {
-            const filePath = path.join(metaDir, file);
-            if (fs.existsSync(filePath)) {
-              try {
-                const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-                await saveAnalysisSnapshot(client.id, "meta", data, cadence);
-              } catch (e) {
-                log(`[DB Push] Failed to persist Meta ${cadence} snapshot for ${client.id}: ${e}`, "scheduler");
-              }
-            }
-          }
-        } catch (error: any) {
-          setPlatformSyncState(client.id, "meta", {
-            last_synced_at: new Date().toISOString(),
-            sync_status: "failed",
-          });
-          log(`Scheduler: Meta agent failed for client '${client.id}': ${error.message}`, "scheduler");
-        } finally {
-          inFlightSyncs.delete(syncKey(client.id, "meta"));
-        }
-      }
+      legs.push({ platform: "meta", agent: metaAgent, clients: metaClients });
     }
-
     if (fs.existsSync(googleAgent) && wantsPlatform("google")) {
       const googleClients = clients
         .filter((c) => c.googleCreds?.GOOGLE_REFRESH_TOKEN)
@@ -457,69 +504,21 @@ async function runAgent(options: AgentRunOptions = {}): Promise<void> {
       if (googleClients.length === 0) {
         log("Scheduler: No Google clients with credentials configured — skipping Google agent", "scheduler");
       }
-      for (const client of googleClients) {
-        log(`Scheduler: Running Google Ads Agent for client '${client.id}'...`, "scheduler");
-        const syncStartedAt = new Date().toISOString();
-        inFlightSyncs.add(syncKey(client.id, "google"));
-        setPlatformSyncState(client.id, "google", {
-          last_synced_at: syncStartedAt,
-          sync_status: "loading",
-        });
-        try {
-          const pythonPath = resolvePythonPath();
-          log(`Scheduler: Executing Google agent with ${pythonPath} for client ${client.id}`, "scheduler");
-
-          await execFileAsync(pythonPath, [googleAgent, "--client", client.id, "--multi-cadence"], {
-            cwd: ADS_AGENT_DIR,
-            timeout: 600000,
-            env: { ...process.env, ...client.googleCreds },
-          });
-        } catch (error: any) {
-          setPlatformSyncState(client.id, "google", {
-            last_synced_at: new Date().toISOString(),
-            sync_status: "failed",
-          });
-          log(`Scheduler: Google agent failed for client '${client.id}': ${error.message}`, "scheduler");
-          inFlightSyncs.delete(syncKey(client.id, "google"));
-          continue;
-        }
-        inFlightSyncs.delete(syncKey(client.id, "google"));
-        setPlatformSyncState(client.id, "google", {
-          last_synced_at: new Date().toISOString(),
-          last_successful_fetch: getLatestAnalysisTimestamp(client.id, "google"),
-          sync_status: "success",
-        });
-
-        // PERSIST TO DB: Capture all cadence JSON files and push to Postgres
-        const googleDir = path.join(DATA_BASE, "clients", client.id, "google");
-        const googleCadenceFiles = [
-          { file: "analysis.json", cadence: "twice_weekly" },
-          { file: "analysis_daily.json", cadence: "daily" },
-          { file: "analysis_weekly.json", cadence: "weekly" },
-          { file: "analysis_biweekly.json", cadence: "biweekly" },
-          { file: "analysis_monthly.json", cadence: "monthly" },
-        ];
-        for (const { file, cadence } of googleCadenceFiles) {
-          const filePath = path.join(googleDir, file);
-          if (fs.existsSync(filePath)) {
-            try {
-              const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-              await saveAnalysisSnapshot(client.id, "google", data, cadence);
-            } catch (e) {
-              log(`[DB Push] Failed to persist Google ${cadence} snapshot for ${client.id}: ${e}`, "scheduler");
-            }
-          }
-        }
-
-        // RUN BIDDING INTELLIGENCE
-        try {
-          await generateBiddingRecommendations(client.id);
-        } catch (e) {
-          log(`[Bidding] Failed for ${client.id}: ${e}`, "scheduler");
-        }
-        log(`Scheduler: Google agent completed for client '${client.id}'`, "scheduler");
-      }
+      legs.push({ platform: "google", agent: googleAgent, clients: googleClients });
     }
+
+    for (const leg of legs) {
+      if (leg.clients.length === 0) continue;
+      const concurrency = Math.min(SYNC_CONCURRENCY, leg.clients.length);
+      log(
+        `Scheduler: ${leg.platform} leg — ${leg.clients.length} client(s), ${concurrency} at a time`,
+        "scheduler",
+      );
+      await runWithConcurrency(leg.clients, concurrency, (client) =>
+        syncClientPlatform(client, leg.platform, leg.agent, pythonPath),
+      );
+    }
+
 
     const duration = Date.now() - startTime;
     schedulerStatus.lastRun = new Date().toISOString();

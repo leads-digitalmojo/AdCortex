@@ -49,6 +49,7 @@ import {
   getPlatformSyncState,
   getSchedulerStatus,
   isPlatformSyncing,
+  isFullRunActive,
   triggerManualRun,
   type AgentPlatform,
 } from "./scheduler";
@@ -3762,6 +3763,15 @@ export async function registerRoutes(
     if (clientIds?.length === 1 && platforms?.length === 1 && isPlatformSyncing(clientIds[0], platforms[0])) {
       return res.status(409).json({
         error: `A ${platforms[0]} sync is already running for this client`,
+        alreadyRunning: true,
+      });
+    }
+
+    // Same for an unscoped "sync all": runAgent drops a second full run on the
+    // floor, so tell the caller instead of showing them a "started" toast.
+    if (!clientIds && isFullRunActive()) {
+      return res.status(409).json({
+        error: "A sync is already running — wait for it to finish before starting another",
         alreadyRunning: true,
       });
     }

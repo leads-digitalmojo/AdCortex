@@ -126,7 +126,10 @@ export default function SettingsPage() {
     try {
       const res = await apiRequest("POST", "/api/scheduler/run-now");
       if (!res.ok) throw new Error((await res.json()).error);
-      toast({ title: "Agent triggered", description: "Data fetch started — this may take ~60 seconds." });
+      toast({
+        title: "Syncing all clients",
+        description: "Fetching fresh Meta and Google data for every client — this runs in the background and can take a while.",
+      });
       setTimeout(() => {
         qc.invalidateQueries({ queryKey: ["/api/scheduler/status"] });
       }, 5000);
@@ -897,10 +900,11 @@ export default function SettingsPage() {
             </div>
           </div>
 
-          {/* Run Agent Now */}
+          {/* Sync all clients — the only unscoped run in the app. Per-client syncs
+              live on the dashboard/sidebar and scope themselves to one client. */}
           <div className="border-t border-border/30 pt-4">
             <p className="text-xs uppercase tracking-wider text-muted-foreground mb-4">
-              Manual Agent Trigger
+              Sync All Clients
             </p>
             
             <div className="space-y-4">
@@ -936,7 +940,7 @@ export default function SettingsPage() {
                       {isCurrentlyRunning ? (
                         <><Loader2 className="w-4 h-4 animate-spin" /> RUNNING...</>
                       ) : (
-                        <><Play className="w-4 h-4" /> RUN DATA AGENT NOW</>
+                        <><Play className="w-4 h-4" /> SYNC ALL CLIENTS</>
                       )}
                     </Button>
                   </div>
