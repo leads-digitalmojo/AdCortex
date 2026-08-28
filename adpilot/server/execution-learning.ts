@@ -483,16 +483,26 @@ export function triggerOutcomeUpdate(analysisData: any): number {
 /**
  * Get all learning entries.
  */
-export function getLearningData(): LearningEntry[] {
-  return readLearningData();
+/**
+ * @param allowedClientIds when given, only entries for these clients are
+ *   returned. Members must not see outcomes from clients they can't access.
+ */
+export function getLearningData(allowedClientIds?: string[]): LearningEntry[] {
+  const entries = readLearningData();
+  if (!allowedClientIds) return entries;
+  const allowed = new Set(allowedClientIds);
+  return entries.filter((e) => e.clientId && allowed.has(e.clientId));
 }
 
 /**
  * Get aggregate summary of learning outcomes.
  * Returns format matching frontend LearningSummary interface.
+ *
+ * @param allowedClientIds see getLearningData — the summary is computed over
+ *   the same restricted set so members see totals for their clients only.
  */
-export function getLearningSummary(): any {
-  const entries = readLearningData();
+export function getLearningSummary(allowedClientIds?: string[]): any {
+  const entries = getLearningData(allowedClientIds);
   const total = entries.length;
   const positive = entries.filter((e) => e.outcome === "POSITIVE").length;
   const negative = entries.filter((e) => e.outcome === "NEGATIVE").length;

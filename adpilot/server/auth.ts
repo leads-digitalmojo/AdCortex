@@ -512,6 +512,29 @@ export function requireOwnership(req: Request, res: Response, next: NextFunction
   });
 }
 
+/**
+ * Guard a route whose client is identified somewhere other than :clientId —
+ * a body field, a query string. Members pass only for clients they can access;
+ * admins always pass.
+ */
+export function requireClientAccess(pickClientId: (req: Request) => string | undefined) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    requireAuthenticatedUser(req, res, async () => {
+      const clientId = pickClientId(req);
+      if (!clientId) {
+        return res.status(400).json({ error: "clientId is required" });
+      }
+
+      const user = req.authUser!;
+      if (!(await enforceOwnership(clientId, user))) {
+        console.warn(`[Auth] Access Denied: ${user.email} (${user.role}) -> client ${clientId}`);
+        return res.status(403).json({ error: "Access denied. You do not have access to this client." });
+      }
+      next();
+    });
+  };
+}
+
 export function requireAdmin(req: Request, res: Response, next: NextFunction) {
   requireRole(["admin"])(req, res, next);
 }

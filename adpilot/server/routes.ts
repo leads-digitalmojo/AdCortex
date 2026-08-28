@@ -71,6 +71,7 @@ import { storage } from "./storage";
 import {
   requireAdmin, requireOwnership, requireAuth, getUserById, enforceOwnership,
   getVisibleClientIds, getAssignedClientIds, setAssignedClientIds, clearAssignments,
+  requireClientAccess,
 } from "./auth";
 import { insightsEngine } from "./intelligence-engine";
 import { getCache, setCache, invalidateCachePattern, cacheKey } from "./cache";
@@ -1328,15 +1329,22 @@ export async function registerRoutes(
   // Returns a map of entity IDs → paused info for entities whose latest
   // action in the audit log was a PAUSE (not subsequently unpaused).
   // Supports optional ?platform= query param ("meta", "google", "all").
-  app.get("/api/paused-entities", requireAdmin, (_req, res) => {
+  app.get("/api/paused-entities", requireAuth, async (req, res) => {
     try {
+      const _req = req;
       const platformFilter = (_req.query.platform as string || "all").toLowerCase();
+
+      // Members only see entities paused on clients they have access to.
+      const visible = await getVisibleClientIds(req.authUser!);
+      const allowed = visible ? new Set(visible) : null;
+      const canSee = (entry: { clientId?: string }) =>
+        !allowed || (entry.clientId ? allowed.has(entry.clientId) : false);
 
       const paused: Record<string, { entityName: string; entityType: string; pausedAt: string; reason?: string; platform?: string }> = {};
 
       // Meta audit log
       if (platformFilter === "meta" || platformFilter === "all") {
-        const metaLog = getAuditLog(500);
+        const metaLog = getAuditLog(500).filter(canSee);
         const latestMetaAction = new Map<string, { action: string; timestamp: string; entityName: string; entityType: string; reason?: string }>();
         for (const entry of metaLog) {
           if (!latestMetaAction.has(entry.entityId)) {
@@ -1364,7 +1372,7 @@ export async function registerRoutes(
 
       // Google audit log
       if (platformFilter === "google" || platformFilter === "all") {
-        const googleLog = getGoogleAuditLog(500);
+        const googleLog = getGoogleAuditLog(500).filter(canSee);
         const latestGoogleAction = new Map<string, { action: string; timestamp: string; entityName: string; entityType: string; reason?: string }>();
         for (const entry of googleLog) {
           if (!latestGoogleAction.has(entry.entityId)) {
@@ -1715,6 +1723,9 @@ export async function registerRoutes(
   // ─── Execution Engine Endpoints ─────────────────────────────────
 
   // Execute a single action (pause, unpause, scale budget, etc.)
+  // Admin-only, unlike the per-client execute routes below: this legacy endpoint
+  // carries no clientId, so there is nothing to authorise a member against. The
+  // UI uses /api/clients/:clientId/:platform/execute-action, which is scoped.
   app.post("/api/execute", requireAdmin, async (req, res) => {
     try {
       const { action, entityId, entityName, entityType, params, requestedBy } = req.body;
@@ -1791,16 +1802,30 @@ export async function registerRoutes(
   });
 
   // Get execution audit log
-  app.get("/api/audit-log", requireAdmin, (_req, res) => {
-    const limit = parseInt(_req.query.limit as string) || 50;
-    const clientId = (_req.query.clientId as string) || undefined;
-    const log = getAuditLog(limit, clientId);
-    res.json(log);
+  app.get("/api/audit-log", requireAuth, async (req, res) => {
+    const limit = parseInt(req.query.limit as string) || 50;
+    const clientId = (req.query.clientId as string) || undefined;
+
+    if (clientId) {
+      if (!(await enforceOwnership(clientId, req.authUser!))) {
+        return res.status(403).json({ error: "Access denied. You do not have access to this client." });
+      }
+      return res.json(getAuditLog(limit, clientId));
+    }
+
+    // No client asked for: admins see the whole log, members only their own
+    // clients' entries. Filter before slicing so the limit isn't spent on
+    // entries the member is not allowed to see.
+    const visible = await getVisibleClientIds(req.authUser!);
+    if (!visible) return res.json(getAuditLog(limit));
+
+    const allowed = new Set(visible);
+    res.json(getAuditLog(Number.MAX_SAFE_INTEGER).filter((e) => e.clientId && allowed.has(e.clientId)).slice(0, limit));
   });
 
   // ─── Auto-Execute Endpoint ──────────────────────────────────────
   // Reads latest analysis, finds auto_action insights, executes them
-  app.post("/api/auto-execute", requireAdmin, async (req, res) => {
+  app.post("/api/auto-execute", requireClientAccess((req) => req.body?.clientId), async (req, res) => {
     try {
       const { clientId, platform = "meta" } = req.body || {};
       if (!clientId) return res.status(400).json({ error: "clientId is required" });
@@ -2688,11 +2713,22 @@ export async function registerRoutes(
   });
 
   // Google Ads audit log
-  app.get("/api/google-audit-log", requireAdmin, (_req, res) => {
-    const limit = parseInt(_req.query.limit as string) || 50;
-    const clientId = (_req.query.clientId as string) || undefined;
-    const log = getGoogleAuditLog(limit, clientId);
-    res.json(log);
+  app.get("/api/google-audit-log", requireAuth, async (req, res) => {
+    const limit = parseInt(req.query.limit as string) || 50;
+    const clientId = (req.query.clientId as string) || undefined;
+
+    if (clientId) {
+      if (!(await enforceOwnership(clientId, req.authUser!))) {
+        return res.status(403).json({ error: "Access denied. You do not have access to this client." });
+      }
+      return res.json(getGoogleAuditLog(limit, clientId));
+    }
+
+    const visible = await getVisibleClientIds(req.authUser!);
+    if (!visible) return res.json(getGoogleAuditLog(limit));
+
+    const allowed = new Set(visible);
+    res.json(getGoogleAuditLog(Number.MAX_SAFE_INTEGER).filter((e) => e.clientId && allowed.has(e.clientId)).slice(0, limit));
   });
 
   // Google auto-execute: pause underperformers from analysis
@@ -3025,7 +3061,7 @@ export async function registerRoutes(
   }
 
   // ─── Consolidated MTD Deliverables (Source of Truth) ────────────
-  app.get("/api/mtd-deliverables", requireAdmin, async (req, res) => {
+  app.get("/api/mtd-deliverables", requireClientAccess((req) => req.query?.client_id as string | undefined), async (req, res) => {
     const { client_id: clientId, platform: requestedPlatform } = req.query as Record<string, string>;
     if (!clientId) return res.status(400).json({ error: "client_id is required" });
 
@@ -3445,18 +3481,18 @@ export async function registerRoutes(
 
   // ─── Execution Learning Endpoints ────────────────────────────────
 
-  app.get("/api/execution-learning", requireAdmin, (_req, res) => {
+  app.get("/api/execution-learning", requireAuth, async (req, res) => {
     try {
-      const data = getLearningData();
+      const data = getLearningData(await getVisibleClientIds(req.authUser!));
       res.json(data);
     } catch (err: any) {
       res.status(500).json({ error: err.message || "Failed to read learning data" });
     }
   });
 
-  app.get("/api/execution-learning/summary", requireAdmin, (_req, res) => {
+  app.get("/api/execution-learning/summary", requireAuth, async (req, res) => {
     try {
-      const summary = getLearningSummary();
+      const summary = getLearningSummary(await getVisibleClientIds(req.authUser!));
       res.json(summary);
     } catch (err: any) {
       res.status(500).json({ error: err.message || "Failed to compute learning summary" });
@@ -3464,7 +3500,7 @@ export async function registerRoutes(
   });
 
   // Trigger outcome update for pending learning entries
-  app.post("/api/execution-learning/update-outcomes", requireAdmin, async (req, res) => {
+  app.post("/api/execution-learning/update-outcomes", requireClientAccess((req) => req.body?.clientId), async (req, res) => {
     try {
       const { clientId, platform } = req.body;
       const data = await readAnalysisData(clientId, platform);
@@ -3476,7 +3512,7 @@ export async function registerRoutes(
   });
 
   // Record a manual action performed outside the dashboard (e.g. directly in Ads Manager)
-  app.post("/api/execution-learning/manual-complete", requireAdmin, (req, res) => {
+  app.post("/api/execution-learning/manual-complete", requireClientAccess((req) => req.body?.clientId), (req, res) => {
     try {
       const { clientId, platform, note } = req.body;
       if (!clientId || !platform || !note || typeof note !== "string" || note.trim().length < 10) {
@@ -3491,7 +3527,7 @@ export async function registerRoutes(
   });
 
   // FEEDBACK LOOP: Save user feedback on recommendations
-  app.post("/api/recommendations/feedback", requireAdmin, (req, res) => {
+  app.post("/api/recommendations/feedback", requireClientAccess((req) => req.body?.clientId), (req, res) => {
     const { text, context, status, clientId, platform } = req.body;
     if (!text || !status) {
       return res.status(400).json({ error: "Text and status are required" });
@@ -3791,7 +3827,7 @@ export async function registerRoutes(
 
   // ─── Command Parser Endpoint ──────────────────────────────────────
   // Parses natural language commands into executable actions
-  app.post("/api/parse-command", requireAdmin, async (req, res) => {
+  app.post("/api/parse-command", requireClientAccess((req) => req.body?.clientId), async (req, res) => {
     try {
       const { command, clientId, platform = "meta" } = req.body;
       if (!clientId) return res.status(400).json({ error: "clientId is required" });
@@ -4049,7 +4085,7 @@ export async function registerRoutes(
   // ─── AI Command Terminal ──────────────────────────────────────────
   // POST /api/ai/command
   // Accepts a natural language command, runs it through Claude, executes actions
-  app.post("/api/ai/command", requireAdmin, async (req, res) => {
+  app.post("/api/ai/command", requireClientAccess((req) => req.body?.clientId), async (req, res) => {
     try {
       const { command, clientId, platform, provider } = req.body as {
         command: string;
@@ -4420,24 +4456,50 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/performance-alerts/:id/complete", requireAdmin, async (req, res) => {
+  app.post("/api/performance-alerts/:id/complete", requireAuth, async (req, res) => {
     try {
-      const id = String(req.params.id);
+      const id = parseInt(String(req.params.id), 10);
+      if (!Number.isInteger(id)) return res.status(400).json({ message: "Invalid alert id" });
+
+      // The alert carries the client, so authorise against that rather than
+      // letting any signed-in user resolve any client's alerts by id.
+      const [alert] = await db.select({ clientId: performanceAlerts.clientId })
+        .from(performanceAlerts)
+        .where(eq(performanceAlerts.id, id))
+        .limit(1);
+      if (!alert) return res.status(404).json({ message: "Alert not found" });
+      if (!(await enforceOwnership(alert.clientId, req.authUser!))) {
+        return res.status(403).json({ message: "Access denied. You do not have access to this client." });
+      }
+
       await db.update(performanceAlerts)
         .set({ status: "completed", updatedAt: new Date() })
-        .where(eq(performanceAlerts.id, parseInt(id)));
+        .where(eq(performanceAlerts.id, id));
       res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ message: err.message });
     }
   });
 
-  app.post("/api/performance-alerts/:id/reject", requireAdmin, async (req, res) => {
+  app.post("/api/performance-alerts/:id/reject", requireAuth, async (req, res) => {
     try {
-      const id = String(req.params.id);
+      const id = parseInt(String(req.params.id), 10);
+      if (!Number.isInteger(id)) return res.status(400).json({ message: "Invalid alert id" });
+
+      // The alert carries the client, so authorise against that rather than
+      // letting any signed-in user resolve any client's alerts by id.
+      const [alert] = await db.select({ clientId: performanceAlerts.clientId })
+        .from(performanceAlerts)
+        .where(eq(performanceAlerts.id, id))
+        .limit(1);
+      if (!alert) return res.status(404).json({ message: "Alert not found" });
+      if (!(await enforceOwnership(alert.clientId, req.authUser!))) {
+        return res.status(403).json({ message: "Access denied. You do not have access to this client." });
+      }
+
       await db.update(performanceAlerts)
         .set({ status: "rejected", updatedAt: new Date() })
-        .where(eq(performanceAlerts.id, parseInt(id)));
+        .where(eq(performanceAlerts.id, id));
       res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ message: err.message });
