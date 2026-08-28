@@ -662,8 +662,70 @@ def evaluate_competitor_relevance(competitor_name, leads, cost):
 # The Pipedream create-report action doesn't pass GAQL fields through CLI.
 # Direct REST API gives us full GAQL control for all queries.
 
+# ── Report cache ────────────────────────────────────────────────────
+# A multi-cadence run analyses the same account over five nested windows
+# (yesterday / 7d / 14d / 30d / MTD). Fetching each window separately meant
+# pulling the same rows from Google five times — ~25s of API time per client
+# where 5s would do.
+#
+# Instead, when the widest window of the run is known, fetch that once and
+# serve every narrower window by filtering the cached rows on segments.date.
+# Intercepting at get_report covers every caller, not just collect_data.
+_REPORT_CACHE = {}          # (resource, query) -> {"since", "until", "rows"}
+_UNSLICEABLE = set()        # (resource, query) pairs whose rows carry no date
+_WIDEST_WINDOW = None       # {"since", "until"} for the run in progress
+_CACHE_DISABLED = False     # set by GOOGLE_AGENT_DISABLE_REPORT_CACHE=1
+_CACHE_STATS = {"fetches": 0, "hits": 0, "slices": 0}
+
+
+def set_report_window(since=None, until=None):
+    """Declare the widest date window this run will ask for, and reset the cache.
+
+    Pass no arguments to disable widening (single-cadence runs).
+    """
+    global _WIDEST_WINDOW, _CACHE_DISABLED
+    _REPORT_CACHE.clear()
+    _UNSLICEABLE.clear()
+    _CACHE_STATS.update({"fetches": 0, "hits": 0, "slices": 0})
+    # Escape hatch: set GOOGLE_AGENT_DISABLE_REPORT_CACHE=1 to fall back to a
+    # fetch per cadence without redeploying, if the cache is ever suspected.
+    _CACHE_DISABLED = os.environ.get("GOOGLE_AGENT_DISABLE_REPORT_CACHE") == "1"
+    if _CACHE_DISABLED:
+        print("  [CACHE] Disabled via GOOGLE_AGENT_DISABLE_REPORT_CACHE=1")
+        _WIDEST_WINDOW = None
+        return
+    _WIDEST_WINDOW = {"since": since, "until": until} if since and until else None
+
+
+def report_cache_stats():
+    return dict(_CACHE_STATS)
+
+
+def _row_date(row):
+    """segments.date for a result row, or None when the query didn't select it."""
+    if not isinstance(row, dict):
+        return None
+    return (row.get("segments") or {}).get("date")
+
+
+def _slice_rows(rows, since, until):
+    """Filter cached rows to a narrower window. None if any row lacks a date."""
+    out = []
+    for r in rows:
+        d = _row_date(r)
+        if not d:
+            return None
+        if since <= d <= until:
+            out.append(r)
+    return out
+
+
 def get_report(resource, since=None, until=None, query=None):
     """Pull a Google Ads report — delegates to direct REST API client.
+
+    Results are cached per (resource, query) for the duration of a run. When
+    set_report_window() has declared a wider window that contains the requested
+    one, the wider set is fetched once and sliced by segments.date.
 
     Args:
         resource: Google Ads resource type (campaign, ad_group, etc.)
@@ -671,8 +733,75 @@ def get_report(resource, since=None, until=None, query=None):
         until: End date string (YYYY-MM-DD) for date filtering
         query: Optional raw GAQL query string (overrides resource)
     """
-    return _direct_get_report(resource, since=since, until=until, query=query,
-                              customer_id=CLIENT_ACCOUNT_ID)
+    if _CACHE_DISABLED:
+        _CACHE_STATS["fetches"] += 1
+        return _direct_get_report(resource, since=since, until=until, query=query,
+                                  customer_id=CLIENT_ACCOUNT_ID)
+
+    key = (resource, query or "")
+
+    # Undated requests can't be sliced or widened — cache them verbatim.
+    if not (since and until):
+        entry = _REPORT_CACHE.get(key)
+        if entry and entry["since"] is None and entry["until"] is None:
+            _CACHE_STATS["hits"] += 1
+            return entry["rows"]
+        _CACHE_STATS["fetches"] += 1
+        rows = _direct_get_report(resource, since=since, until=until, query=query,
+                                  customer_id=CLIENT_ACCOUNT_ID)
+        if isinstance(rows, list):
+            _REPORT_CACHE[key] = {"since": None, "until": None, "rows": rows}
+        return rows
+
+    entry = _REPORT_CACHE.get(key)
+    if entry and entry["since"] and entry["until"]:
+        if entry["since"] == since and entry["until"] == until:
+            _CACHE_STATS["hits"] += 1
+            return entry["rows"]
+        # Cached window contains the requested one — slice it.
+        if entry["since"] <= since and until <= entry["until"] and key not in _UNSLICEABLE:
+            sliced = _slice_rows(entry["rows"], since, until)
+            if sliced is not None:
+                _CACHE_STATS["slices"] += 1
+                return sliced
+            # Rows carry no date; never try to slice this query again.
+            _UNSLICEABLE.add(key)
+
+    # Widen the fetch to the run's widest window so later cadences can slice it.
+    fetch_since, fetch_until = since, until
+    widen = (
+        _WIDEST_WINDOW is not None
+        and key not in _UNSLICEABLE
+        and _WIDEST_WINDOW["since"] <= since
+        and until <= _WIDEST_WINDOW["until"]
+    )
+    if widen:
+        fetch_since, fetch_until = _WIDEST_WINDOW["since"], _WIDEST_WINDOW["until"]
+
+    _CACHE_STATS["fetches"] += 1
+    rows = _direct_get_report(resource, since=fetch_since, until=fetch_until,
+                              query=query, customer_id=CLIENT_ACCOUNT_ID)
+    if not isinstance(rows, list):
+        return rows  # error dict — don't cache
+
+    _REPORT_CACHE[key] = {"since": fetch_since, "until": fetch_until, "rows": rows}
+
+    if not widen or (fetch_since == since and fetch_until == until):
+        return rows
+
+    sliced = _slice_rows(rows, since, until)
+    if sliced is not None:
+        _CACHE_STATS["slices"] += 1
+        return sliced
+
+    # Widened but undated: redo the exact fetch and stop widening this query.
+    _UNSLICEABLE.add(key)
+    _CACHE_STATS["fetches"] += 1
+    exact = _direct_get_report(resource, since=since, until=until, query=query,
+                               customer_id=CLIENT_ACCOUNT_ID)
+    if isinstance(exact, list):
+        _REPORT_CACHE[key] = {"since": since, "until": until, "rows": exact}
+    return exact
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━ DATA HELPERS ━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -4186,10 +4315,19 @@ def run_multi_cadence_analysis():
     """
     cadence_order = ["daily", "twice_weekly", "weekly", "biweekly", "monthly"]
 
+    # The five cadence windows are nested, so one fetch of their union serves
+    # them all — see set_report_window(). Without this each cadence re-pulls the
+    # same rows from Google.
+    windows = [CADENCE_WINDOWS[c] for c in cadence_order if c in CADENCE_WINDOWS]
+    widest_since = min(w["since"] for w in windows)
+    widest_until = max(w["until"] for w in windows)
+    set_report_window(widest_since, widest_until)
+
     print(f"\n{'='*60}")
     print(f"  MOJO PERFORMANCE AGENT — GOOGLE ADS (MULTI-CADENCE)")
     print(f"  Date: {NOW.strftime('%Y-%m-%d %H:%M')}")
     print(f"  Running {len(cadence_order)} cadences: {', '.join(cadence_order)}")
+    print(f"  Fetch window: {widest_since} to {widest_until} (shared across cadences)")
     print(f"{'='*60}")
 
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -4224,7 +4362,10 @@ def run_multi_cadence_analysis():
     print(f"  [SAVED] {default_path} (copy of twice_weekly)")
 
     # Summary across all cadences
+    stats = report_cache_stats()
     print(f"\n{'='*60}")
+    print(f"  REPORT CACHE: {stats['fetches']} API fetches, "
+          f"{stats['hits']} cache hits, {stats['slices']} window slices")
     print(f"  MULTI-CADENCE ANALYSIS COMPLETE")
     for cname, analysis in cadence_results.items():
         status = analysis.get("status", "UNKNOWN")
