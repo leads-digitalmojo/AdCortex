@@ -1,19 +1,56 @@
 # AdPilot Scoring Formulas — Google & Meta
 
+> **Updated after the P0 correctness fixes.** The two layers previously used
+> different formulas and disagreed by up to 30 points on the same campaign. They now
+> share one canonical definition. Sections below that still describe quadratic decay
+> are historical and are being revised; `scoring-config.ts` and `scoring_engine.py`
+> are the authority.
+
 This document is a reference inventory of every health-score formula currently
 in the codebase, across both scoring layers:
 
 - **Python layer** (`ads_agent/scoring_engine.py`, `ads_agent/google_ads_agent_v2.py`,
   `ads_agent/meta_ads_agent_v2.py`) — computes scores when campaign data is generated.
 - **TypeScript layer** (`adpilot/server/scoring-config.ts`, `google-transform.ts`,
-  `meta-transform.ts`) — re-normalizes data for the frontend, and in several places
-  **recomputes and overwrites** what Python produced with different formulas/weights.
+  `meta-transform.ts`) — re-normalizes data for the frontend.
 
-Wherever TS overwrites Python's number, it's called out explicitly — the two systems
-do not always agree.
+**Both layers now use the same stepped bands**, verified by a parity check across 20
+cases. `adpilot/server/test-scoring.ts` is the regression suite; run it after any
+change here.
 
-No persisted override file exists at `ads_agent/data/scoring_config_overrides.json`,
-so the account-level TS scoring currently runs on pure hardcoded defaults.
+### Canonical formulas
+
+**Cost metrics** (CPL, CPQL, CPSV, CPC, CPM — lower is better), ratio = actual/target:
+
+| ratio | score |
+|---|---|
+| ≤ 1.10 | 100 |
+| ≤ 1.20 | 70 |
+| ≤ 1.30 | 40 |
+| above | 10 |
+| **spend with zero leads** | **0** |
+| **no target configured** | **null — excluded from the weighted average** |
+
+**Budget pacing**, dev = \|actual/planned − 1\|:
+
+| dev | score |
+|---|---|
+| ≤ 0.10 | 100 |
+| ≤ 0.15 | 60 |
+| above | 20 |
+
+Band comparisons carry a 1e-9 epsilon in both languages, because `1.1 - 1.0` is
+`0.10000000000000009` in IEEE 754 and would otherwise fall into the wrong band at
+exactly 110%.
+
+Three rules matter more than the numbers:
+
+1. **Zero leads on live spend scores 0**, not 100. Previously CPL was 0 in that case,
+   which every ratio-based scorer read as "far below target" — i.e. perfect.
+2. **A missing target is `null`, not full marks.** Null metrics are excluded from
+   both the numerator and the weighted denominator, and the composite is rescaled.
+3. **Thresholds in `ScoringThresholds` are honored.** They previously existed in the
+   config interface but the scorers hardcoded their own constants.
 
 ---
 
@@ -249,7 +286,7 @@ static: { cpl:40, cpm:25, ctr:20, creative_age:15 }
 | Level | Bands |
 |---|---|
 | Account (both platforms) | Dual-gate GREEN/YELLOW/ORANGE/RED — composite thresholds 75/55/35, veto thresholds 0.40/0.20/0.05 |
-| Campaign/Ad-set/Ad (both platforms) | WINNER ≥70, UNDERPERFORMER <35, else WATCH |
+| Campaign/Ad-set/Ad (both platforms) | WINNER ≥75 **and** CPL ≤ target; UNDERPERFORMER <50 **or** CPL >1.3× target; NOT_SCORED when no score; else WATCH |
 
 `problem-detector.ts` doesn't compute scores — it reads existing `health_score`/`detailed_breakdown` and applies threshold/severity rules on top (weak metric = score <60; CRITICAL if account score <40, any KPI <15, CPL >2× target with pacing/spend anomalies, etc).
 
@@ -270,3 +307,11 @@ intended tuning knobs but are **never actually wired into the live call path**
 - **Google account level** and **Meta account level**: edit `adpilot/server/scoring-config.ts` — this is the value actually shown to users.
 - **Google campaign/ad-group/ad level**: edit `ads_agent/scoring_engine.py` — Python's number is trusted as-is, nothing overwrites it.
 - **Meta campaign/ad-set/ad level**: edit `adpilot/server/meta-transform.ts` — TS fully overwrites whatever Python computes, so changing `scoring_engine.py` here has no visible effect.
+
+### Changing a formula
+
+Cost and budget band boundaries live in `DEFAULT_SCORING_CONFIG.thresholds`
+(`scoring-config.ts`) and are genuinely honored. **Any change there must be mirrored in
+`score_staged_cost` / `score_staged_budget` in `ads_agent/scoring_engine.py`**, or the
+two layers drift apart again. `adpilot/server/test-scoring.ts` guards the boundaries;
+`adpilot/server/compare-scoring.ts` previews the blast radius on real client data.

@@ -75,6 +75,7 @@ import {
 } from "./auth";
 import { insightsEngine } from "./intelligence-engine";
 import { getCache, setCache, invalidateCachePattern, cacheKey } from "./cache";
+import { readBenchmarks, resolveBenchmarksPath, getBenchmarksPath } from "./benchmarks";
 import { computeMetaAvailableFunds, computeGoogleAvailableFunds, getCachedAvailableFunds, setCachedAvailableFunds } from "./available-funds";
 
 // ─── Multi-Client Registry ─────────────────────────────────────────
@@ -578,24 +579,7 @@ async function readAnalysisData(clientId: string, platform: string, cadence?: st
   // PRIORITY: platform-specific file first (written by PUT /benchmarks),
   // then fall back to the generic benchmarks.json.
   // This ensures scores always reflect the latest benchmarks saved from the UI.
-  let benchmarksData: any = null;
-  try {
-    const canonicalPath = path.join(BENCHMARKS_BASE, clientId, `benchmarks_${platform}.json`);
-    const altPath1 = path.join(DATA_BASE, "clients", clientId, `benchmarks_${platform}.json`);
-    const altPath2 = path.join(DATA_BASE, "clients", clientId, "benchmarks.json");
-    const legacyPath = path.join(BENCHMARKS_BASE, clientId, "benchmarks.json");
-
-    // Try paths in priority order: platform-specific → fallback
-    const tryPaths = [canonicalPath, altPath1, altPath2, legacyPath];
-    const bmPath = tryPaths.find(p => fs.existsSync(p));
-
-    if (bmPath) {
-      benchmarksData = JSON.parse(fs.readFileSync(bmPath, "utf-8"));
-      console.log(`[readAnalysisData] Loaded benchmarks from: ${bmPath}`);
-    }
-  } catch (e) {
-    console.warn(`[readAnalysisData] Failed to load benchmarks for ${clientId}/${platform}:`, e);
-  }
+  const benchmarksData = readBenchmarks(clientId, platform);
 
   // 4. Attach Benchmarks to raw data before normalization
   if (benchmarksData) {
@@ -2476,31 +2460,17 @@ export async function registerRoutes(
 
   // ─── Benchmarks Endpoints ──────────────────────────────────────────
 
-  function getBenchmarksPath(clientId: string, platform: string): string {
-    return path.join(BENCHMARKS_BASE, clientId, `benchmarks_${platform}.json`);
-  }
-
   app.get("/api/clients/:clientId/benchmarks", requireOwnership, async (req, res) => {
     const { clientId } = req.params as Record<string, string>;
     const platform = (req.query.platform as string) || "meta";
-    const benchPath = getBenchmarksPath(clientId, platform);
-    if (!fs.existsSync(benchPath)) {
-      // Fallback: check if the legacy generic benchmarks.json exists
-      const legacyPath = path.join(BENCHMARKS_BASE, clientId, "benchmarks.json");
-      if (fs.existsSync(legacyPath)) {
-        try {
-          const data = JSON.parse(fs.readFileSync(legacyPath, "utf-8"));
-          return res.json(data);
-        } catch { }
-      }
+    if (!resolveBenchmarksPath(clientId, platform)) {
       return res.json({ ...(await getDefaultBenchmarks(clientId, platform)), updated_at: null });
     }
-    try {
-      const data = JSON.parse(fs.readFileSync(benchPath, "utf-8"));
-      res.json(data);
-    } catch {
-      res.json({ ...(await getDefaultBenchmarks(clientId, platform)), updated_at: null });
+    const data = readBenchmarks(clientId, platform);
+    if (Object.keys(data).length === 0) {
+      return res.json({ ...(await getDefaultBenchmarks(clientId, platform)), updated_at: null });
     }
+    res.json(data);
   });
 
   app.put("/api/clients/:clientId/benchmarks", requireOwnership, (req, res) => {
@@ -3232,14 +3202,15 @@ export async function registerRoutes(
     try {
       const analysis = await readAnalysisData(clientId, platform);
       mp = analysis?.monthly_pacing || null;
-    } catch (_) { }
+    } catch (err: any) {
+      console.warn(`[pacing] Could not read analysis for ${clientId}/${platform}: ${err?.message || err}`);
+    }
 
-    // Fetch benchmarks for user-configured targets
-    let bm: Record<string, any> = {};
-    try {
-      const bmPath = path.join(DATA_BASE, "clients", clientId, "benchmarks.json");
-      if (fs.existsSync(bmPath)) bm = JSON.parse(fs.readFileSync(bmPath, "utf-8"));
-    } catch (_) { }
+    // Fetch benchmarks for user-configured targets. Uses the shared resolver so
+    // this screen sees the same targets the UI saved — it previously read only the
+    // legacy benchmarks.json, which the UI never writes, so edited targets never
+    // appeared here.
+    const bm: Record<string, any> = readBenchmarks(clientId, platform);
 
     // Fetch MTD deliverables (manual inputs: svs, qualified_leads, closures)
     let manual: any = { svs_achieved: 0, positive_leads_achieved: 0, closures_achieved: 0, quality_lead_count: 0 };
@@ -3250,7 +3221,9 @@ export async function registerRoutes(
         const legacyPath = getLegacyMtdDeliverablesPath(clientId);
         if (fs.existsSync(legacyPath)) manual = JSON.parse(fs.readFileSync(legacyPath, "utf-8"));
       }
-    } catch (_) { }
+    } catch (err: any) {
+      console.warn(`[pacing] Could not read MTD deliverables for ${clientId}/${platform}: ${err?.message || err}`);
+    }
 
     // ─── Authoritative delivered values ─────────────────────────────
     const mtdSpend = mp?.mtd?.spend ?? 0;

@@ -129,7 +129,15 @@ CADENCE_WINDOWS = {
 }
 
 # ── Load Benchmarks from File (Single Source of Truth) ──
-BENCHMARKS_PATH = os.path.join(DATA_DIR, "clients", _CLIENT_ID, "benchmarks.json")
+# Priority: benchmarks_meta.json (what the UI's PUT /benchmarks writes) → the legacy
+# un-suffixed benchmarks.json. Reading only the legacy name meant benchmarks edited
+# in the UI never reached this scorer, which silently kept using the defaults below.
+# Mirrors resolveBenchmarksPath() in adpilot/server/benchmarks.ts.
+_BENCHMARK_CANDIDATES = [
+    os.path.join(DATA_DIR, "clients", _CLIENT_ID, "benchmarks_meta.json"),
+    os.path.join(DATA_DIR, "clients", _CLIENT_ID, "benchmarks.json"),
+]
+BENCHMARKS_PATH = next((p for p in _BENCHMARK_CANDIDATES if os.path.exists(p)), _BENCHMARK_CANDIDATES[0])
 _BENCHMARKS_LOADED = False
 _BENCHMARKS = {}
 if os.path.exists(BENCHMARKS_PATH):
@@ -137,9 +145,9 @@ if os.path.exists(BENCHMARKS_PATH):
         with open(BENCHMARKS_PATH, "r") as _bf:
             _BENCHMARKS = json.load(_bf)
         _BENCHMARKS_LOADED = True
-        print("Loaded benchmarks from file")
+        print(f"Loaded benchmarks from {os.path.basename(BENCHMARKS_PATH)}")
     except Exception as _be:
-        print(f"[WARN] Failed to load benchmarks.json: {_be}")
+        print(f"[WARN] Failed to load {os.path.basename(BENCHMARKS_PATH)}: {_be}")
         print("Using default benchmarks")
 else:
     print("Using default benchmarks")
@@ -1595,13 +1603,9 @@ def analyze_breakdowns(ds):
     """Process demographic breakdown data from Meta API into structured format."""
     print("  Module 3.6B: Demographic Breakdowns...")
     result = {}
-    target_locations = ["Hyderabad", "Secunderabad"]
-    benchmarks_path = os.path.join(DATA_DIR, "clients", _CLIENT_ID, "benchmarks.json")
-    if os.path.exists(benchmarks_path):
-        try:
-            benchmarks = json.load(open(benchmarks_path))
-            target_locations = benchmarks.get("target_locations", target_locations)
-        except: pass
+    # Reuse the benchmarks already resolved at module load rather than re-reading a
+    # path the UI never writes to.
+    target_locations = _BENCHMARKS.get("target_locations") or ["Hyderabad", "Secunderabad"]
 
     def process_rows(raw_rows, dimension_key):
         # Aggregate by dimension value to avoid duplicates from daily chunks

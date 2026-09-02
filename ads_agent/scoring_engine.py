@@ -71,23 +71,47 @@ def normalize_score(score_map, total_weight=100):
         total = (total / total_weight) * 100
     return round(max(0, min(100, total)), 1)
 
-def score_staged_cost(actual, target, weight):
+# Band comparisons need a tolerance: abs(1.1 - 1.0) is 0.10000000000000009 in IEEE
+# 754, so an account pacing at exactly 110% would otherwise fall into the next band
+# down. The same epsilon is applied in adpilot/server/scoring-config.ts.
+BAND_EPSILON = 1e-9
+
+def within_band(value, boundary):
+    return value <= boundary + BAND_EPSILON
+
+def has_spend_without_outcome(data):
+    """
+    True when an entity spent money and produced no leads/conversions at all.
+
+    CPL is 0 in that case, and every ratio-based scorer reads 0 as "far below
+    target" — i.e. perfect. It is the opposite: the worst possible cost outcome,
+    and precisely the campaign the Zero Leads Drain SOP exists to catch.
+    """
+    leads = data.get("leads", data.get("conversions", 0)) or 0
+    spend = data.get("spend", data.get("cost", 0)) or 0
+    return leads <= 0 and spend > 0
+
+def score_staged_cost(actual, target, weight, no_outcome=False):
     """
     Staged scoring for CPSV, CPQL, CPL:
     - On target (up to +10%): 100
     - +10% to +20%: 70
     - +20% to +30%: 40
     - 30% or above: 10
+
+    no_outcome=True means spend with zero results — scores 0, strictly worse than
+    the floor given to a merely expensive result. See has_spend_without_outcome().
     """
     if target <= 0: return weight * 0.5, "no_data"
+    if no_outcome: return 0.0, "poor"
     ratio = actual / target
-    if ratio <= 1.1:
+    if within_band(ratio, 1.1):
         score_100 = 100
         band = "good"
-    elif ratio <= 1.2:
+    elif within_band(ratio, 1.2):
         score_100 = 70
         band = "watch"
-    elif ratio <= 1.3:
+    elif within_band(ratio, 1.3):
         score_100 = 40
         band = "watch"
     else:
@@ -103,10 +127,10 @@ def score_staged_budget(pacing_ratio, weight):
     - >15%: 20
     """
     dev = abs(pacing_ratio - 1.0)
-    if dev <= 0.10:
+    if within_band(dev, 0.10):
         score_100 = 100
         band = "good"
-    elif dev <= 0.15:
+    elif within_band(dev, 0.15):
         score_100 = 60
         band = "watch"
     else:
@@ -151,7 +175,7 @@ def calculate_meta_health(mtd_data, creative_avg):
     breakdown["budget"], _ = score_staged_budget(pacing_ratio, 100)
     
     breakdown["cpql"], bands["cpql"] = score_staged_cost(mtd_data.get("cpql", 0), t.get("cpql", 1500), 100)
-    breakdown["cpl"], bands["cpl"] = score_staged_cost(mtd_data.get("cpl", 0), t.get("cpl", 850), 100)
+    breakdown["cpl"], bands["cpl"] = score_staged_cost(mtd_data.get("cpl", 0), t.get("cpl", 850), 100, no_outcome=has_spend_without_outcome(mtd_data))
     breakdown["creative"] = round(creative_avg, 2)
     bands["creative"] = get_band_from_score(creative_avg)
     
@@ -177,7 +201,7 @@ def calculate_google_health(mtd_data, campaign_avg, creative_avg):
     breakdown["budget"], _ = score_staged_budget(pacing_ratio, 100)
     
     breakdown["cpql"], _ = score_staged_cost(mtd_data.get("cpql", 0), t.get("cpql", 1500), 100)
-    breakdown["cpl"], _ = score_staged_cost(mtd_data.get("cpl", 0), t.get("cpl", 850), 100)
+    breakdown["cpl"], _ = score_staged_cost(mtd_data.get("cpl", 0), t.get("cpl", 850), 100, no_outcome=has_spend_without_outcome(mtd_data))
     breakdown["campaign"] = round(campaign_avg, 2)
     breakdown["creative"] = round(creative_avg, 2)
     
@@ -197,7 +221,7 @@ def score_meta_campaign_module(data, target_cpl):
     breakdown = {}
     bands = {}
     
-    breakdown["cpl"], bands["cpl"] = score_staged_cost(data.get("cpl", 0), target_cpl, 100)
+    breakdown["cpl"], bands["cpl"] = score_staged_cost(data.get("cpl", 0), target_cpl, 100, no_outcome=has_spend_without_outcome(data))
     breakdown["cvr"], bands["cvr"] = score_linear(data.get("cvr", 0), 1.5, 100, False) # Relaxed real-estate CVR target
     breakdown["ctr"], bands["ctr"] = score_linear(data.get("ctr", 0), 0.45, 100, False) # Relaxed real-estate CTR target
     
@@ -229,7 +253,7 @@ def score_meta_creative_module(data, target_cpl):
     if is_video:
         # Meta Video: CPL (35), CPM (20), TSR (15), VHR (15), CTR (15)
         w = {"cpl": 35, "cpm": 20, "tsr": 15, "vhr": 15, "ctr": 15}
-        breakdown["cpl"], _ = score_staged_cost(data.get("cpl", 0), target_cpl, 100)
+        breakdown["cpl"], _ = score_staged_cost(data.get("cpl", 0), target_cpl, 100, no_outcome=has_spend_without_outcome(data))
         breakdown["cpm"], _ = score_linear(data.get("cpm", 0), 200, 100, True)
         breakdown["tsr"], _ = score_linear(data.get("thumb_stop_pct", 0), 25, 100, False)
         breakdown["vhr"], _ = score_linear(data.get("hold_rate_pct", 0), 25, 100, False)
@@ -237,7 +261,7 @@ def score_meta_creative_module(data, target_cpl):
     else:
         # Meta Static: CPL (45), CPM (25), CTR (20), CPC (10)
         w = {"cpl": 45, "cpm": 25, "ctr": 20, "cpc": 10}
-        breakdown["cpl"], _ = score_staged_cost(data.get("cpl", 0), target_cpl, 100)
+        breakdown["cpl"], _ = score_staged_cost(data.get("cpl", 0), target_cpl, 100, no_outcome=has_spend_without_outcome(data))
         breakdown["cpm"], _ = score_linear(data.get("cpm", 0), 150, 100, True)
         breakdown["ctr"], _ = score_linear(data.get("ctr", 0), 0.6, 100, False)
         breakdown["cpc"], _ = score_staged_cost(data.get("avg_cpc", 0), 40, 100)
@@ -257,7 +281,7 @@ def score_google_campaign_module(data, target_cpl):
     unit = {"cpl": "currency", "cvr": "percent", "cpc": "currency", "qs": "number",
             "ctr": "percent", "is": "percent", "rsa": "number"}
 
-    breakdown["cpl"], _ = score_staged_cost(data.get("cpl", 0), target_cpl, 100)
+    breakdown["cpl"], _ = score_staged_cost(data.get("cpl", 0), target_cpl, 100, no_outcome=has_spend_without_outcome(data))
     actual["cpl"], target["cpl"] = data.get("cpl", 0), target_cpl
 
     breakdown["cvr"], _ = score_linear(data.get("cvr", 0), 5.0, 100, False) # Search Target 5%
@@ -309,7 +333,7 @@ def score_google_adgroup_module(data, target_cpl):
     unit = {"cpl": "currency", "cvr": "percent", "ctr": "percent", "qs": "number",
             "is": "percent", "cpc": "currency"}
 
-    breakdown["cpl"], _ = score_staged_cost(data.get("cpl", 0), target_cpl, 100)
+    breakdown["cpl"], _ = score_staged_cost(data.get("cpl", 0), target_cpl, 100, no_outcome=has_spend_without_outcome(data))
     actual["cpl"], target["cpl"] = data.get("cpl", 0), target_cpl
 
     breakdown["cvr"], _ = score_linear(data.get("cvr", 0), 5.0, 100, False)
@@ -352,7 +376,7 @@ def score_google_dg_module(data, target_cpl):
     unit = {"cpl": "currency", "cpm": "currency", "cvr": "percent", "ctr": "percent",
             "tsr": "percent", "freq": "number"}
 
-    breakdown["cpl"], _ = score_staged_cost(data.get("cpl", 0), target_cpl, 100)
+    breakdown["cpl"], _ = score_staged_cost(data.get("cpl", 0), target_cpl, 100, no_outcome=has_spend_without_outcome(data))
     actual["cpl"], target["cpl"] = data.get("cpl", 0), target_cpl
 
     breakdown["cpm"], _ = score_staged_cost(data.get("avg_cpm", 0), 120, 100)
@@ -391,7 +415,7 @@ def score_google_rsa_module(data, target_cpl):
     unit = {"cpl": "currency", "ctr": "percent", "cvr": "percent",
             "ad_strength": "label", "expected_ctr": "label"}
 
-    breakdown["cpl"], _ = score_staged_cost(data.get("cpl", 0), target_cpl, 100)
+    breakdown["cpl"], _ = score_staged_cost(data.get("cpl", 0), target_cpl, 100, no_outcome=has_spend_without_outcome(data))
     actual["cpl"], target["cpl"] = data.get("cpl", 0), target_cpl
 
     breakdown["ctr"], _ = score_linear(data.get("ctr", 0), 2.0, 100, False)

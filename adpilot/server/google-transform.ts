@@ -18,6 +18,9 @@ import {
   sumMetricScores,
   computeMinRatio,
   computeDualGateStatus,
+  countScoredMetrics,
+  roundMetricScore,
+  type MetricScore,
 } from "./scoring-config";
 
 /**
@@ -27,17 +30,21 @@ import {
  *
  * Weights: CPSV 25 · Budget 25 · CPQL 20 · CPL 20 · Creative 10
  *
- * Formulas:
- *   - Cost metrics (CPSV, CPL, CPQL): Quadratic decay with acceleration
- *   - Budget: Quadratic penalty for both overspend and underspend
+ * Formulas (canonical — mirrors ads_agent/scoring_engine.py):
+ *   - Cost metrics (CPSV, CPL, CPQL): stepped bands 100/70/40/10 at +10/+20/+30%
+ *   - Budget: stepped bands 100/60/20 at ±10%/±15% deviation
  *   - Campaign/Creative: Agent-provided values
+ *
+ * A metric with no configured target scores null and is excluded from the weighted
+ * average — it never contributes free marks.
  *
  * Status determination: Dual-gate system (composite + weakest-link veto)
  */
 function recomputeGoogleHealthScore(data: any): {
   score: number;
-  breakdown: Record<string, number>;
+  breakdown: Record<string, MetricScore>;
   status: string;
+  coverage: { scored: number; total: number; unmeasured: string[] };
 } {
   const ap = data.account_pulse || {};
   const rawMtd = ap.mtd_pacing || {};                 // raw agent MTD pacing
@@ -105,14 +112,23 @@ function recomputeGoogleHealthScore(data: any): {
   const creativeScore = scoreWeightedCreativeMetric(creativeHealth, weights.creative);
 
   const breakdown = {
-    cpsv: Math.round(cpsvScore * 100) / 100,
-    budget: Math.round(budgetScore * 100) / 100,
-    cpql: Math.round(cpqlScore * 100) / 100,
-    cpl: Math.round(cplScore * 100) / 100,
-    creative: Math.round(creativeScore * 100) / 100,
+    cpsv: roundMetricScore(cpsvScore),
+    budget: roundMetricScore(budgetScore),
+    cpql: roundMetricScore(cpqlScore),
+    cpl: roundMetricScore(cplScore),
+    creative: roundMetricScore(creativeScore),
   };
 
-  const compositeScore = Math.round(sumMetricScores(breakdown) * 100) / 100;
+  // Metrics with no configured target score null and are excluded from the
+  // weighted average rather than donating their full weight as free marks.
+  const compositeScore = Math.round(sumMetricScores(breakdown, weights) * 100) / 100;
+  const coverage = countScoredMetrics(breakdown);
+  if (coverage.unmeasured.length > 0) {
+    console.warn(
+      `[recomputeGoogleHealthScore] Scored on ${coverage.scored}/${coverage.total} metrics — ` +
+      `no target configured for: ${coverage.unmeasured.join(", ")}`
+    );
+  }
 
   // ─── Apply Dual-Gate Status Determination ───
   // Compute weakest-link ratio: min(score_i / weight_i) across all 5 metrics
@@ -120,7 +136,7 @@ function recomputeGoogleHealthScore(data: any): {
 
   // Determine status using dual-gate (composite + veto)
   const dualGateStatus = computeDualGateStatus(compositeScore, minRatio);
-  return { score: compositeScore, breakdown, status: dualGateStatus };
+  return { score: compositeScore, breakdown, status: dualGateStatus, coverage };
 }
 
 function cleanCampaignName(name: string): string {
@@ -150,6 +166,16 @@ function parseAgeDaysFromName(name: string): number | null {
   return days >= 0 ? days : null;
 }
 
+/**
+ * The CPL target for classification, matching the fallback order used elsewhere in
+ * this file. Returns null when nothing is configured, so getClassification skips
+ * the CPL rule rather than comparing against a made-up number.
+ */
+function resolveTargetCpl(benchmarks: any): number | null {
+  const t = benchmarks?.google_cpl ?? benchmarks?.cpl ?? null;
+  return typeof t === "number" && Number.isFinite(t) && t > 0 ? t : null;
+}
+
 function normalizeCampaign(c: any, benchmarks: any = {}): any {
   const cost = c.cost || 0;
   const clicks = c.clicks || 0;
@@ -174,8 +200,10 @@ function normalizeCampaign(c: any, benchmarks: any = {}): any {
   const campaignType = c.campaign_type || "unknown";
   const layer = layerMap[campaignType] || campaignType;
 
-  const healthScore = c.health_score ?? c.score ?? 0;
-  const classification = getClassification(healthScore);
+  // `?? null` (not `?? 0`): an entity that failed to score is NOT_SCORED, not the
+  // worst-scoring entity in the account.
+  const healthScore = c.health_score ?? c.score ?? null;
+  const classification = getClassification(healthScore, c.cpl, resolveTargetCpl(benchmarks));
 
   // Calculate weighted TSR/VHR from nested ads if applicable
   let campaignTsr = 0;
@@ -278,7 +306,7 @@ function extractAdGroups(campaigns: any[], benchmarks: any = {}): any[] {
       const impressions = ag.impressions || 0;
       const conversions = ag.conversions || 0;
       const avg_cpc = ag.avg_cpc > 0 ? ag.avg_cpc : deriveCpc(cost, clicks);
-      const healthScore = ag.health_score ?? ag.score ?? 0;
+      const healthScore = ag.health_score ?? ag.score ?? null;
 
       adGroups.push({
         ad_group_id: ag.id || ag.ad_group_id || "",
@@ -288,7 +316,7 @@ function extractAdGroups(campaigns: any[], benchmarks: any = {}): any[] {
         campaign_type: campaignType,
         status: ag.status || "UNKNOWN",
         health_score: healthScore,
-        classification: getClassification(healthScore),
+        classification: getClassification(healthScore, ag.cpl, resolveTargetCpl(benchmarks)),
 
         // Metrics
         impressions,
@@ -329,7 +357,9 @@ function extractCreativeHealth(campaigns: any[], existingCreativeHealth: any[], 
         ...creative,
         creative_age_days: ageDays,
         classification: getClassification(
-          creative.health_score ?? creative.creative_score ?? creative.performance_score ?? 0
+          creative.health_score ?? creative.creative_score ?? creative.performance_score ?? null,
+          creative.cpl,
+          resolveTargetCpl(benchmarks)
         ),
       };
     });
@@ -387,7 +417,9 @@ function extractCreativeHealth(campaigns: any[], existingCreativeHealth: any[], 
           score_bands: {},
           detailed_breakdown: ad.detailed_breakdown || reconstructDetailed(ad.score_breakdown, ad.ad_type === "VIDEO" ? "google_creative" : "google_rsa", ad, benchmarks),
           classification: getClassification(
-            ad.health_score ?? ad.performance_score ?? ad.creative_score ?? 0
+            ad.health_score ?? ad.performance_score ?? ad.creative_score ?? null,
+            ad.cpl,
+            resolveTargetCpl(benchmarks)
           ),
           should_pause: ad.should_pause || false,
           auto_pause_reasons: ad.auto_pause_reasons || [],
@@ -621,17 +653,26 @@ function reconstructDetailed(breakdown: any, type: string, item: any = {}, targe
     expected_ctr: { actual: item.expected_ctr, target: "ABOVE_AVERAGE", unit: "label" },
   };
 
+  // Spend with zero leads is the WORST cost outcome, not the best. Left alone,
+  // cpl === 0 reads as "far below target" and collects full marks on the heaviest
+  // metric — which is exactly the campaign the Zero Leads Drain SOP exists to catch.
+  const itemLeads = Number(item.leads ?? item.conversions ?? 0);
+  const itemSpend = Number(item.spend ?? item.cost ?? 0);
+  const noLeadsOnSpend = itemLeads <= 0 && itemSpend > 0;
+
   for (const k in w) {
-    let score = breakdown[k];
+    let score: MetricScore = breakdown[k];
 
     // Hot re-score cost metrics if raw data is available
-    if (k === 'cpl' && item.cpl > 0) {
+    if (k === 'cpl' && noLeadsOnSpend) {
+      score = scoreStagedCostDynamic(Number.POSITIVE_INFINITY, targetCpl);
+    } else if (k === 'cpl' && item.cpl > 0) {
       score = scoreStagedCostDynamic(item.cpl, targetCpl);
     } else if (k === 'cpc' && (item.cpc > 0 || item.avg_cpc > 0)) {
       score = scoreStagedCostDynamic(item.cpc || item.avg_cpc, 30);
     }
 
-    if (score !== undefined) {
+    if (score !== undefined && score !== null) {
       const at = actualTarget[k] || {};
       detailed[k] = {
         score: Math.round(score * 10) / 10,

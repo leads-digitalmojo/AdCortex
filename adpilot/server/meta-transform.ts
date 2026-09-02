@@ -9,25 +9,32 @@
 
 import fs from "fs";
 import path from "path";
+import { getClassification, type Classification } from "../shared/classification";
 import {
   scoreStagedCostDynamic,
-  scoreStagedBudgetDynamic,
   getMetricWeights,
   scoreWeightedCostMetric,
   scoreWeightedBudgetMetric,
   sumMetricScores,
   computeMinRatio,
   computeDualGateStatus,
-  scoreHigher,
-  scoreLeads,
-  scoreFrequency,
-  scoreCreativeAge,
+  countScoredMetrics,
+  roundMetricScore,
+  formatMetricScore,
+  type MetricScore,
 } from "./scoring-config";
 
-function getMetaClassification(score: number): "WINNER" | "WATCH" | "UNDERPERFORMER" {
-  if (score >= 70) return "WINNER";
-  if (score < 35) return "UNDERPERFORMER";
-  return "WATCH";
+/**
+ * Delegates to the shared classifier so Meta, Google and the Python agent all use
+ * one set of thresholds. Previously this held its own 70/35 bands, which disagreed
+ * with both the documented spec and the Google path.
+ */
+function getMetaClassification(
+  score: number | null | undefined,
+  cpl?: number | null,
+  targetCpl?: number | null
+): Classification {
+  return getClassification(score, cpl, targetCpl);
 }
 
 /**
@@ -44,10 +51,15 @@ function normalizeRate(val: number | undefined | null): number {
 }
 
 function scoreLowerMeta(actual: number, target: number, weight: number): number {
-  if (target <= 0) return weight;
-  const safeActual = Number.isFinite(actual) ? actual : Number.POSITIVE_INFINITY;
-  const d = Math.max(0, (safeActual - target) / target);
-  return weight * Math.max(0, 1 - 1.5 * d - 5 * d * d);
+  // Delegates to the canonical stepped-band scorer so Meta entity scores agree with
+  // Google's and with the Python agent. This previously held its own quadratic copy,
+  // which scored the same campaign up to 30 points differently.
+  //
+  // No target configured falls back to neutral half marks, matching the "no_data"
+  // branch of score_staged_cost in ads_agent/scoring_engine.py — never full marks.
+  if (!(target > 0)) return weight * 0.5;
+  const score = scoreStagedCostDynamic(actual, target);
+  return score === null ? weight * 0.5 : weight * (score / 100);
 }
 
 function scoreHigherMeta(actual: number, target: number, weight: number): number {
@@ -57,24 +69,11 @@ function scoreHigherMeta(actual: number, target: number, weight: number): number
   return weight * Math.max(0, 1 - 1.5 * d - 5 * d * d);
 }
 
-function scoreLeadsMeta(actual: number, expected: number, weight: number): number {
-  if (expected <= 0) return weight;
-  const safeActual = Number.isFinite(actual) ? actual : 0;
-  const d = Math.max(0, (expected - safeActual) / expected);
-  return weight * Math.max(0, 1 - 1.5 * d - 5 * d * d);
-}
-
 function scoreFrequencyMeta(freq: number, warn: number, severe: number, weight: number): number {
   if (freq <= warn) return weight;
   if (freq >= severe) return 0;
   const excess = (freq - warn) / (severe - warn);
   return weight * (1 - excess * excess);
-}
-
-function scoreBudgetMeta(actual: number, planned: number, weight: number): number {
-  if (planned <= 0) return weight;
-  const b = Math.abs(actual - planned) / planned;
-  return weight * Math.max(0, 1 - b - 10 * b * b);
 }
 
 function scoreCreativeAgeMeta(ageDays: number, weight: number): number {
@@ -159,10 +158,13 @@ function scoreWeightedMetaCreativeMetric(creatives: any[], weight: number): numb
  * Weights (Mojo AdCortex Meta):
  *   CPSV 25% · Budget 25% · CPQL 20% · CPL 20% · Creative 10%
  *
- * Formulas:
- *   - Cost metrics (CPSV, CPL, CPQL): Quadratic decay with acceleration
- *   - Budget: Quadratic penalty for both overspend and underspend
+ * Formulas (canonical — mirrors ads_agent/scoring_engine.py):
+ *   - Cost metrics (CPSV, CPL, CPQL): stepped bands 100/70/40/10 at +10/+20/+30%
+ *   - Budget: stepped bands 100/60/20 at ±10%/±15% deviation
  *   - Creative: Spend-weighted average with diversity factor
+ *
+ * A metric with no configured target scores null and is excluded from the weighted
+ * average — it never contributes free marks.
  *
  * Status determination: Dual-gate system
  *   - Composite gate: Total score threshold (GREEN ≥75, YELLOW ≥55, ORANGE ≥35, RED <35)
@@ -171,8 +173,9 @@ function scoreWeightedMetaCreativeMetric(creatives: any[], weight: number): numb
  */
 function recomputeHealthScore(data: any): {
   score: number;
-  breakdown: Record<string, number>;
+  breakdown: Record<string, MetricScore>;
   status: string;
+  coverage: { scored: number; total: number; unmeasured: string[] };
 } {
   const ap = data.account_pulse || {};
   const mp = data.monthly_pacing || {};
@@ -197,7 +200,7 @@ function recomputeHealthScore(data: any): {
 
   console.log(`[recomputeHealthScore] MTD Actuals: spend=${actualSpendMtd}, leads=${actualLeadsMtd}, qLeads=${actualQLeadsMtd}, svs=${actualSvsMtd}`);
 
-  // ─── CPL Score (Lower is better: Quadratic) ───
+  // ─── CPL Score (Lower is better: stepped bands) ───
   const cplTarget = benchmarks.cpl || benchmarks.cpl_target || mp.targets?.cpl || 800;
   const actualCplMtd = actualLeadsMtd > 0 ? actualSpendMtd / actualLeadsMtd : 0;
   const cplScore = scoreWeightedCostMetric(
@@ -205,7 +208,7 @@ function recomputeHealthScore(data: any): {
     cplTarget,
     weights.cpl
   );
-  console.log(`[recomputeHealthScore] CPL Debug: target=${cplTarget}, actual=${actualCplMtd.toFixed(2)}, score=${cplScore.toFixed(2)}`);
+  console.log(`[recomputeHealthScore] CPL Debug: target=${cplTarget}, actual=${actualCplMtd.toFixed(2)}, score=${formatMetricScore(cplScore)}`);
 
   // ─── Budget/Pacing Score (MTD spend vs prorated monthly budget) ───
   const now = new Date();
@@ -220,7 +223,7 @@ function recomputeHealthScore(data: any): {
     daysInMonth,
     weights.budget
   );
-  console.log(`[recomputeHealthScore] Budget Debug: target=${monthlyBudget}, actual=${actualSpendMtd}, days=${daysElapsed}/${daysInMonth}, score=${budgetScore.toFixed(2)}`);
+  console.log(`[recomputeHealthScore] Budget Debug: target=${monthlyBudget}, actual=${actualSpendMtd}, days=${daysElapsed}/${daysInMonth}, score=${formatMetricScore(budgetScore)}`);
 
   // ─── CPQL Score (Lower is better: Staged) ───
   const cpqlTarget = benchmarks.cpql_target || benchmarks.cpql || mp.targets?.cpql || 1500;
@@ -228,7 +231,7 @@ function recomputeHealthScore(data: any): {
   const cpqlScore = actualQLeadsMtd > 0
     ? scoreWeightedCostMetric(actualCpqlMtd, cpqlTarget, weights.cpql)
     : 10;
-  console.log(`[recomputeHealthScore] CPQL Debug: target=${cpqlTarget}, actual=${actualCpqlMtd.toFixed(2)}, score=${cpqlScore.toFixed(2)}`);
+  console.log(`[recomputeHealthScore] CPQL Debug: target=${cpqlTarget}, actual=${actualCpqlMtd.toFixed(2)}, score=${formatMetricScore(cpqlScore)}`);
 
   // ─── CPSV Score (Lower is better: Staged) ───
   const cpsvTarget = benchmarks.cpsv_low || benchmarks.cpsv_target_low || mp.targets?.cpsv?.low || 0;
@@ -238,7 +241,7 @@ function recomputeHealthScore(data: any): {
     cpsvTarget,
     weights.cpsv
   );
-  console.log(`[recomputeHealthScore] CPSV Debug: target=${cpsvTarget}, actual=${actualCpsvMtd.toFixed(2)}, score=${cpsvScore.toFixed(2)}`);
+  console.log(`[recomputeHealthScore] CPSV Debug: target=${cpsvTarget}, actual=${actualCpsvMtd.toFixed(2)}, score=${formatMetricScore(cpsvScore)}`);
 
   // ─── Creative Score (Spend-weighted average + diversity factor) ───
   const creativeHealth: any[] = data.creative_health || [];
@@ -246,23 +249,32 @@ function recomputeHealthScore(data: any): {
 
   // ─── Build Breakdown (weighted metric scores) ───
   const breakdown = {
-    cpsv: Math.round(cpsvScore * 100) / 100,
-    budget: Math.round(budgetScore * 100) / 100,
-    cpql: Math.round(cpqlScore * 100) / 100,
-    cpl: Math.round(cplScore * 100) / 100,
-    creative: Math.round(creativeScore * 100) / 100,
+    cpsv: roundMetricScore(cpsvScore),
+    budget: roundMetricScore(budgetScore),
+    cpql: roundMetricScore(cpqlScore),
+    cpl: roundMetricScore(cplScore),
+    creative: roundMetricScore(creativeScore),
   };
 
   // ─── Calculate Composite Score ───
-  const compositeScore = Math.round(sumMetricScores(breakdown) * 100) / 100;
+  // Metrics with no configured target score null and are excluded from the
+  // weighted average rather than donating their full weight as free marks.
+  const compositeScore = Math.round(sumMetricScores(breakdown, weights) * 100) / 100;
+  const coverage = countScoredMetrics(breakdown);
+  if (coverage.unmeasured.length > 0) {
+    console.warn(
+      `[recomputeHealthScore] Scored on ${coverage.scored}/${coverage.total} metrics — ` +
+      `no target configured for: ${coverage.unmeasured.join(", ")}`
+    );
+  }
 
   // ─── Apply Dual-Gate Status Determination ───
   const minRatio = computeMinRatio(breakdown, weights);
   const dualGateStatus = computeDualGateStatus(compositeScore, minRatio);
 
   console.log(`[recomputeHealthScore] FINAL RESULT: score=${compositeScore}, status=${dualGateStatus}`);
-  
-  return { score: compositeScore, breakdown, status: dualGateStatus };
+
+  return { score: compositeScore, breakdown, status: dualGateStatus, coverage };
 }
 
 /**
@@ -331,7 +343,8 @@ function scoreMetaEntity(
 
   let actualCpl = entity.cpl;
   if ((entity.leads || 0) <= 0 && (entity.spend || 0) > 0) {
-    actualCpl = entity.spend;
+    // Spend with no leads is the worst cost outcome, not an expensive one.
+    actualCpl = Number.POSITIVE_INFINITY;
   }
   const sCpl = scoreLowerMeta(actualCpl, cplTarget, weights.cpl);
   detailed.cpl = {
@@ -396,12 +409,6 @@ function scoreMetaEntity(
   return { health_score: +totalScore.toFixed(1), detailed_breakdown: detailed };
 }
 
-function scoreLinearMeta(actual: number, target: number, weight: number, lowerIsBetter: boolean): number {
-  if (target <= 0) return weight * 0.5;
-  const d = lowerIsBetter ? Math.max(0, (actual - target) / target) : Math.max(0, (target - actual) / target);
-  return weight * Math.max(0, 1 - 1.5 * d - 5 * d * d);
-}
-
 // ── Main normalizer ───────────────────────────────────────────────────────────
 
 export function normalizeMetaAnalysis(raw: any): any {
@@ -438,7 +445,7 @@ export function normalizeMetaAnalysis(raw: any): any {
       return {
         ...campaign,
         health_score: result.health_score,
-        classification: getMetaClassification(result.health_score),
+        classification: getMetaClassification(result.health_score, campaign.cpl, targets.cpl),
         score_breakdown: scoreBreakdown,
         score_bands: scoreBands,
         detailed_breakdown: result.detailed_breakdown,
@@ -462,7 +469,7 @@ export function normalizeMetaAnalysis(raw: any): any {
       return {
         ...adset,
         health_score: result.health_score,
-        classification: getMetaClassification(result.health_score),
+        classification: getMetaClassification(result.health_score, adset.cpl, targets.cpl),
         score_breakdown: scoreBreakdown,
         score_bands: scoreBands,
         detailed_breakdown: result.detailed_breakdown,
@@ -566,7 +573,7 @@ export function normalizeMetaAnalysis(raw: any): any {
       return {
         ...creative,
         health_score: +total.toFixed(1),
-        classification: getMetaClassification(total),
+        classification: getMetaClassification(total, creative.cpl, targets.cpl),
         score_breakdown: scoreBreakdown,
         score_bands: scoreBands,
         detailed_breakdown: detailed,

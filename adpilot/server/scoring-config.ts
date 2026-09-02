@@ -11,20 +11,26 @@ import path from "path";
 const SCORING_CONFIG_FILE = path.resolve(import.meta.dirname, "../../ads_agent/data/scoring_config_overrides.json");
 
 export interface ScoringThresholds {
-  // Cost metrics (CPL, CPC, CPQL, CPSV, CPM) — lower is better
-  // Uses continuous formula: Score = 100 - ((ratio - 1) / (red_mult - 1)) * 60 for target < actual < red
+  // Cost metrics (CPL, CPC, CPQL, CPSV, CPM) — lower is better.
+  // Stepped bands on ratio = actual / target. Every field here is honored by
+  // scoreStagedCostDynamic / scoreWeightedCostMetric.
   cost: {
-    target_ratio: number;         // Ratio = 1.0 (at target) → score 100 (default: 1.0)
-    red_multiplier: number;       // Ratio ≥ this × target → score ≤ 50 (default: 1.5 = 50% over)
-    floor_multiplier: number;     // Ratio ≥ this × target → score 0 (default: 2.0 = 2× target)
-    excellent_floor: number;      // Minimum score in excellent range (default: 40)
+    good_ratio: number;           // ratio ≤ this → good_score (default: 1.10)
+    watch_ratio: number;          // ratio ≤ this → watch_score (default: 1.20)
+    poor_ratio: number;           // ratio ≤ this → poor_score (default: 1.30)
+    good_score: number;           // default: 100
+    watch_score: number;          // default: 70
+    poor_score: number;           // default: 40
+    floor_score: number;          // ratio above poor_ratio (default: 10)
   };
-  // Budget pacing — deviation from 100%
-  // Uses continuous formula: Score = 100 - (|deviation| / threshold) * 50 within bounds
+  // Budget pacing — absolute deviation from planned spend.
+  // Stepped bands on dev = |actual / planned − 1|.
   budget: {
-    target_deviation: number;     // Deviation = 0 (perfect pacing) → score 100 (default: 0.0)
-    red_deviation: number;        // Deviation ≥ this → score ≤ 50 (default: 0.30 = ±30%)
-    excellent_floor: number;      // Minimum score in excellent range (default: 40);
+    good_deviation: number;       // dev ≤ this → good_score (default: 0.10)
+    watch_deviation: number;      // dev ≤ this → watch_score (default: 0.15)
+    good_score: number;           // default: 100
+    watch_score: number;          // default: 60
+    floor_score: number;          // dev above watch_deviation (default: 20)
   };
 }
 
@@ -65,18 +71,25 @@ export interface ScoringConfig {
  * Default scoring configuration matching Mojo AdCortex v1.0
  */
 export const DEFAULT_SCORING_CONFIG: ScoringConfig = {
-  version: "2.0-formula-quadratic",
+  version: "3.0-stepped-bands",
   thresholds: {
+    // Mirrors ads_agent/scoring_engine.py score_staged_cost — the two layers must agree.
     cost: {
-      target_ratio: 1.0,         // At target = 100
-      red_multiplier: 1.5,       // 50% over target = RED threshold (score 50)
-      floor_multiplier: 2.0,     // 2× target = score 0
-      excellent_floor: 40,       // Min score in excellent range (deprecated with quadratic)
+      good_ratio: 1.1,
+      watch_ratio: 1.2,
+      poor_ratio: 1.3,
+      good_score: 100,
+      watch_score: 70,
+      poor_score: 40,
+      floor_score: 10,
     },
+    // Mirrors ads_agent/scoring_engine.py score_staged_budget.
     budget: {
-      target_deviation: 0.0,     // Perfect pacing = 100
-      red_deviation: 0.30,       // ±30% = RED threshold (score 50)
-      excellent_floor: 40,       // Min score in excellent range (deprecated with quadratic)
+      good_deviation: 0.10,
+      watch_deviation: 0.15,
+      good_score: 100,
+      watch_score: 60,
+      floor_score: 20,
     },
   },
   weights: {
@@ -185,25 +198,63 @@ export function resetScoringConfig(): void {
 }
 
 /**
- * Score a cost metric (CPL, CPC, CPQL, CPSV, CPM) using quadratic decay formula
- *
- * Formula (Mojo AdCortex v1.0):
- * d = max(0, (actual - target) / target)
- * score = 100 × max(0, 1 − 1.5d − 5d²)
- *
- * Behavior:
- * - at target (d=0) → 100
- * - 10% over (d=0.1) → 80
- * - 20% over (d=0.2) → 50
- * - 30% over (d=0.3) → 10
- * - 34%+ over → 0
+ * A metric score, or `null` when the metric could not be measured (no target
+ * configured, or an unusable input). `null` is NOT zero and NOT full marks — it
+ * must be excluded from the weighted average by the aggregation helpers below.
  */
-export function scoreStagedCostDynamic(actual: number, target: number): number {
-  if (target <= 0) return 100; // Edge case: undefined target = full marks
+export type MetricScore = number | null;
 
-  const d = Math.max(0, (actual - target) / target);
-  const rawScore = Math.max(0, 1 - 1.5 * d - 5 * d * d);
-  return Math.round(rawScore * 100);
+/**
+ * Sentinel meaning "spend with no outcome at all" (e.g. zero leads on live spend).
+ * Callers pass Infinity for this case; it scores 0 — strictly worse than the
+ * floor score given to a merely expensive result.
+ */
+function isNoOutcomeSentinel(actual: number): boolean {
+  return actual === Number.POSITIVE_INFINITY;
+}
+
+/**
+ * Band comparisons need a tolerance: `1.1 - 1` is 0.10000000000000009 in IEEE 754,
+ * so an account pacing at exactly 110% would otherwise fall into the next band down.
+ * The same epsilon is applied in ads_agent/scoring_engine.py so both layers agree.
+ */
+const BAND_EPSILON = 1e-9;
+
+function withinBand(value: number, boundary: number): boolean {
+  return value <= boundary + BAND_EPSILON;
+}
+
+/**
+ * Score a cost metric (CPL, CPC, CPQL, CPSV, CPM) using stepped bands.
+ *
+ * Canonical formula — mirrors ads_agent/scoring_engine.py score_staged_cost so the
+ * Python and TypeScript layers produce the same number for the same campaign.
+ *
+ * ratio = actual / target
+ * - ratio ≤ 1.1 → 100
+ * - ratio ≤ 1.2 → 70
+ * - ratio ≤ 1.3 → 40
+ * - above      → 10
+ *
+ * Special cases:
+ * - no target        → null (not measured — excluded from the weighted average)
+ * - spend, no outcome→ 0 (worse than the floor: there is no result at any price)
+ * - NaN              → null, with a warning; a bad input must not silently score
+ */
+export function scoreStagedCostDynamic(actual: number, target: number): MetricScore {
+  if (!(target > 0)) return null;
+  if (isNoOutcomeSentinel(actual)) return 0;
+  if (!Number.isFinite(actual)) {
+    console.warn(`[scoring] Non-finite cost metric (${actual}) against target ${target} — scoring as not measured.`);
+    return null;
+  }
+
+  const { cost } = getScoringConfig().thresholds;
+  const ratio = actual / target;
+  if (withinBand(ratio, cost.good_ratio)) return cost.good_score;
+  if (withinBand(ratio, cost.watch_ratio)) return cost.watch_score;
+  if (withinBand(ratio, cost.poor_ratio)) return cost.poor_score;
+  return cost.floor_score;
 }
 
 /**
@@ -248,61 +299,76 @@ export function scoreCreativeAge(age: number, refreshDays: number, maxDays: numb
 }
 
 /**
- * Score budget pacing using quadratic formula
+ * Score budget pacing using stepped bands on deviation from plan.
  *
- * Formula (Mojo AdCortex v1.0):
- * b = |actual_spend - planned_budget| / planned_budget
- * score = 100 × max(0, 1 − b − 10b²)
+ * Canonical formula — mirrors ads_agent/scoring_engine.py score_staged_budget.
+ * Both overspend and underspend are failures.
  *
- * Behavior: Both overspend and underspend are failures.
- * - 0% deviation (100% pacing) → 100
- * - 10% deviation (±10%) → 80
- * - 20% deviation (±20%) → 40
- * - 29%+ deviation → 0
+ * dev = |pacing − 1|
+ * - dev ≤ 0.10 → 100
+ * - dev ≤ 0.15 → 60
+ * - above      → 20
  */
-export function scoreStagedBudgetDynamic(pacingPct: number): number {
-  const b = Math.abs(pacingPct / 100 - 1);
-  const rawScore = Math.max(0, 1 - b - 10 * b * b);
-  return Math.round(rawScore * 100);
+function scoreBudgetDeviation(deviation: number): number {
+  const { budget } = getScoringConfig().thresholds;
+  if (withinBand(deviation, budget.good_deviation)) return budget.good_score;
+  if (withinBand(deviation, budget.watch_deviation)) return budget.watch_score;
+  return budget.floor_score;
 }
 
-export function scoreWeightedCostMetric(actual: number, target: number, weight: number): number {
-  if (target <= 0) return weight;
-
-  const safeActual = Number.isFinite(actual) ? actual : Number.POSITIVE_INFINITY;
-  const d = Math.max(0, (safeActual - target) / target);
-  return weight * Math.max(0, 1 - 1.5 * d - 5 * d * d);
+export function scoreStagedBudgetDynamic(pacingPct: number): MetricScore {
+  if (!Number.isFinite(pacingPct)) return null;
+  return scoreBudgetDeviation(Math.abs(pacingPct / 100 - 1));
 }
 
+/**
+ * Weighted variant of scoreStagedCostDynamic — returns a contribution in [0, weight],
+ * or null when the metric is not measurable.
+ */
+export function scoreWeightedCostMetric(actual: number, target: number, weight: number): MetricScore {
+  const score = scoreStagedCostDynamic(actual, target);
+  return score === null ? null : weight * (score / 100);
+}
+
+/**
+ * Weighted budget pacing against pro-rata planned spend.
+ * Returns null when there is no budget to pace against — an unset budget must not
+ * hand out full marks.
+ */
 export function scoreWeightedBudgetMetric(
   actualSpend: number,
   monthlyBudget: number,
   daysElapsed: number,
   daysInMonth: number,
   weight: number
-): number {
-  if (monthlyBudget <= 0 || daysInMonth <= 0) return weight;
+): MetricScore {
+  if (!(monthlyBudget > 0) || !(daysInMonth > 0)) return null;
 
   const safeDaysElapsed = Math.max(0, Math.min(daysElapsed, daysInMonth));
   const planned = monthlyBudget * (safeDaysElapsed / daysInMonth);
-  if (planned <= 0) return weight;
+  if (planned <= 0) return null;
+  if (!Number.isFinite(actualSpend)) return null;
 
-  const b = Math.abs(actualSpend - planned) / planned;
-  return weight * Math.max(0, 1 - b - 10 * b * b);
+  const deviation = Math.abs(actualSpend - planned) / planned;
+  return weight * (scoreBudgetDeviation(deviation) / 100);
 }
 
-export function scoreWeightedCreativeMetric(creatives: any[], weight: number): number {
+/**
+ * Spend-weighted creative health. Returns null when there are no active creatives
+ * carrying spend — that is missing data, not a zero-quality creative set.
+ */
+export function scoreWeightedCreativeMetric(creatives: any[], weight: number): MetricScore {
   const activeCreatives = (creatives || []).filter(
     (creative: any) => creative?.status === "ACTIVE" && (creative?.spend ?? 0) > 0
   );
 
-  if (activeCreatives.length === 0) return 0;
+  if (activeCreatives.length === 0) return null;
 
   const totalSpend = activeCreatives.reduce(
     (sum: number, creative: any) => sum + (creative?.spend ?? 0),
     0
   );
-  if (totalSpend <= 0) return 0;
+  if (totalSpend <= 0) return null;
 
   const weightedHealth = activeCreatives.reduce((sum: number, creative: any) => {
     const health = creative?.health_score ?? creative?.creative_score ?? creative?.performance_score ?? 0;
@@ -314,8 +380,61 @@ export function scoreWeightedCreativeMetric(creatives: any[], weight: number): n
   return weight * (hAvg / 100) * diversity;
 }
 
-export function sumMetricScores(scores: Record<string, number>): number {
-  return Object.values(scores).reduce((total, score) => total + score, 0);
+/**
+ * Combine weighted metric contributions into a 0–100 composite.
+ *
+ * Metrics scored `null` (no target configured, unusable input) are excluded from
+ * BOTH the numerator and the weighted denominator, then the result is rescaled to
+ * 100. Without the rescale, an unmeasurable metric would silently donate its full
+ * weight as free marks — which is how a client with no CPSV benchmark used to
+ * collect 25 points for nothing.
+ *
+ * `weights` is optional only for backward compatibility; always pass it.
+ */
+export function sumMetricScores(
+  scores: Record<string, MetricScore>,
+  weights?: Record<string, number>
+): number {
+  const scored = Object.entries(scores).filter(
+    ([, score]) => score !== null && score !== undefined && Number.isFinite(score)
+  ) as Array<[string, number]>;
+
+  const total = scored.reduce((sum, [, score]) => sum + score, 0);
+  if (!weights) return total;
+
+  const scoredWeight = scored.reduce((sum, [metric]) => sum + (weights[metric] || 0), 0);
+  if (scoredWeight <= 0) return 0;
+
+  const totalWeight = Object.values(weights).reduce((sum, w) => sum + w, 0);
+  if (totalWeight <= 0 || scoredWeight === totalWeight) return total;
+
+  // Rescale the measured subset back onto the full weight scale.
+  return (total / scoredWeight) * totalWeight;
+}
+
+/** Render a score for logs, distinguishing "not measured" from a real zero. */
+export function formatMetricScore(score: MetricScore): string {
+  if (score === null || score === undefined || !Number.isFinite(score)) return "not measured";
+  return (score as number).toFixed(2);
+}
+
+/** Round for display without collapsing an unmeasured metric into 0. */
+export function roundMetricScore(score: MetricScore): MetricScore {
+  if (score === null || score === undefined || !Number.isFinite(score)) return null;
+  return Math.round(score * 100) / 100;
+}
+
+/** How many metrics actually carried a score, for "scored on N of M" in the UI. */
+export function countScoredMetrics(scores: Record<string, MetricScore>): {
+  scored: number;
+  total: number;
+  unmeasured: string[];
+} {
+  const entries = Object.entries(scores);
+  const unmeasured = entries
+    .filter(([, score]) => score === null || score === undefined || !Number.isFinite(score))
+    .map(([metric]) => metric);
+  return { scored: entries.length - unmeasured.length, total: entries.length, unmeasured };
 }
 
 /**
@@ -368,7 +487,7 @@ export function getClassificationThresholds(): {
  *         min_ratio = 0.5 (CPQL is the weakest link at 50% of max)
  */
 export function computeMinRatio(
-  scores: Record<string, number>,
+  scores: Record<string, MetricScore>,
   weights: Record<string, number>
 ): number {
   let minRatio = 1.0;
@@ -377,8 +496,11 @@ export function computeMinRatio(
     const weight = weights[metric] || 0;
     if (weight <= 0) continue; // Skip metrics with no weight
 
-    const ratio = scores[metric] / weight;
-    minRatio = Math.min(minRatio, ratio);
+    const score = scores[metric];
+    // An unmeasured metric cannot veto — it is absent, not failing.
+    if (score === null || score === undefined || !Number.isFinite(score)) continue;
+
+    minRatio = Math.min(minRatio, score / weight);
   }
 
   return minRatio;

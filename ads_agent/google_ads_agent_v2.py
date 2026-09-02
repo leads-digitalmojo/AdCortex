@@ -207,6 +207,42 @@ if os.path.exists(_CONFIG_PATH):
         _config = json.load(f)
         MONTHLY_TARGETS["google"].update(_config.get("google_targets", {}))
 
+# ── Load overrides from the Benchmarks tab (takes precedence over config.json) ──
+# The UI's PUT /api/clients/:id/benchmarks writes benchmarks_google.json with
+# google_*-prefixed keys. Nothing ever wrote config.json, so before this every
+# client was scored against the module defaults above (CPL 850) no matter what the
+# team configured. Mirrors resolveBenchmarksPath() in adpilot/server/benchmarks.ts.
+_BENCHMARK_CANDIDATES = [
+    os.path.join(SCRIPT_DIR, "data", "clients", _CLIENT_ID, "benchmarks_google.json"),
+    os.path.join(SCRIPT_DIR, "data", "clients", _CLIENT_ID, "benchmarks.json"),
+]
+_BENCHMARKS_PATH = next((p for p in _BENCHMARK_CANDIDATES if os.path.exists(p)), None)
+_BENCHMARKS = {}
+if _BENCHMARKS_PATH:
+    try:
+        with open(_BENCHMARKS_PATH) as f:
+            _BENCHMARKS = json.load(f)
+        # UI key → MONTHLY_TARGETS key. Prefer the google_-prefixed form, fall back
+        # to the unprefixed one for older benchmark files.
+        for _target_key, _ui_keys in {
+            "cpl":    ("google_cpl", "cpl"),
+            "budget": ("google_budget", "budget"),
+            "leads":  ("google_leads", "leads"),
+            "svs":    ("google_svs_low", "svs_low"),
+            "cpsv":   ("google_cpsv_low", "cpsv_low"),
+        }.items():
+            for _ui_key in _ui_keys:
+                _val = _BENCHMARKS.get(_ui_key)
+                if isinstance(_val, (int, float)) and _val > 0:
+                    MONTHLY_TARGETS["google"][_target_key] = _val
+                    break
+        print(f"Loaded Google targets from {os.path.basename(_BENCHMARKS_PATH)}: {MONTHLY_TARGETS['google']}")
+    except Exception as _be:
+        print(f"[WARN] Failed to load {os.path.basename(_BENCHMARKS_PATH)}: {_be}")
+        print("Using default Google targets")
+else:
+    print("[WARN] No benchmarks file found — using default Google targets")
+
 # ── DYNAMIC ALERT THRESHOLDS (40% above target for Google) ──
 CPL_TARGET = MONTHLY_TARGETS["google"]["cpl"]  # 850
 CPL_ALERT = round(CPL_TARGET * 1.4)             # 1190 — 40% above target
@@ -1448,6 +1484,9 @@ def analyze_campaigns(campaigns, ad_groups, quality_score_by_campaign=None):
                 "quality_score": ag["quality_score"],
                 "impression_share": ag.get("search_impression_share", 0) or 0,
                 "campaign_type": ctype,
+                # So the scorer can distinguish "cheap leads" from "no leads at all".
+                "leads": ag.get("conversions", 0),
+                "spend": ag.get("cost", 0),
             }
             ag_scored = scoring_engine.score_google_adgroup_module(ag_score_data, CPL_TARGET)
             ag["health_score"] = ag_scored["score"]
@@ -3972,6 +4011,11 @@ def run_analysis(cadence="twice_weekly"):
             "quality_score": campaign_qs,
             "impression_share": ca.get("search_impression_share", 0) or 0,
             "campaign_type": ca.get("campaign_type", "location"),
+            # Needed so the scorer can tell "cheap leads" from "no leads at all",
+            # and so RSA is scored on the real count instead of defaulting to 0.
+            "leads": ca.get("conversions", 0),
+            "spend": ca.get("cost", 0),
+            "rsa_count": ca.get("rsa_count", 0),
         }
         if is_dg_type(ca.get("campaign_type", "")):
             scored = scoring_engine.score_google_dg_module(score_data, CPL_TARGET)
