@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useClient, type ClientInfo } from "@/lib/client-context";
 import { useAuth } from "@/lib/auth-context";
@@ -16,6 +16,8 @@ import {
 } from "lucide-react";
 
 // ─── Types ──────────────────────────────────────────────────────────
+
+type PlatformKey = "meta" | "google";
 
 interface CredentialStatus {
   hasMeta: boolean;
@@ -78,8 +80,19 @@ import { ImportMccModal } from "@/components/import-mcc-modal";
 
 // ─── Credentials Panel ───────────────────────────────────────────────
 
-function CredentialsPanel({ clientId, onClose }: { clientId: string; onClose: () => void }) {
+function CredentialsPanel({
+  clientId,
+  onClose,
+  focusPlatform,
+}: {
+  clientId: string;
+  onClose: () => void;
+  /** Scroll to and highlight one platform's section when the panel opens. */
+  focusPlatform?: PlatformKey | null;
+}) {
   const { toast } = useToast();
+  const metaSectionRef = useRef<HTMLDivElement>(null);
+  const googleSectionRef = useRef<HTMLDivElement>(null);
 
   const { data: credStatus, isLoading: loadingCreds } = useQuery<CredentialStatus>({
     queryKey: [`/api/clients/${clientId}/credentials`],
@@ -99,6 +112,14 @@ function CredentialsPanel({ clientId, onClose }: { clientId: string; onClose: ()
 
   const [savingMeta, setSavingMeta] = useState(false);
   const [savingGoogle, setSavingGoogle] = useState(false);
+
+  // Jump to the platform the user clicked, so they land on the right form
+  // instead of hunting for it inside the combined panel.
+  useEffect(() => {
+    if (!focusPlatform || loadingCreds) return;
+    const target = focusPlatform === "meta" ? metaSectionRef.current : googleSectionRef.current;
+    target?.scrollIntoView({ block: "start", behavior: "smooth" });
+  }, [focusPlatform, loadingCreds]);
 
   // Pre-fill known non-secret fields when creds load
   useEffect(() => {
@@ -174,7 +195,12 @@ function CredentialsPanel({ clientId, onClose }: { clientId: string; onClose: ()
             </div>
 
             {/* ── Meta Ads ── */}
-            <div className="space-y-3">
+            <div
+              ref={metaSectionRef}
+              className={`space-y-3 scroll-mt-2 rounded-lg transition-shadow ${
+                focusPlatform === "meta" ? "ring-2 ring-blue-400/40 ring-offset-2 ring-offset-background p-3 -m-1" : ""
+              }`}
+            >
               <div className="flex items-center gap-2">
                 <Facebook className="w-4 h-4 text-blue-400" />
                 <p className="text-base font-medium">Meta Ads</p>
@@ -204,7 +230,12 @@ function CredentialsPanel({ clientId, onClose }: { clientId: string; onClose: ()
             <div className="border-t border-border/40" />
 
             {/* ── Google Ads ── */}
-            <div className="space-y-3">
+            <div
+              ref={googleSectionRef}
+              className={`space-y-3 scroll-mt-2 rounded-lg transition-shadow ${
+                focusPlatform === "google" ? "ring-2 ring-amber-400/40 ring-offset-2 ring-offset-background p-3 -m-1" : ""
+              }`}
+            >
               <div className="flex items-center gap-2">
                 <Globe className="w-4 h-4 text-amber-400" />
                 <p className="text-base font-medium">Google Ads</p>
@@ -259,7 +290,19 @@ function ClientRow({ client, isDefault }: { client: ClientInfo; isDefault: boole
   const [, setLocation] = useLocation();
   const [expanded, setExpanded] = useState(false);
   const [showCreds, setShowCreds] = useState(false);
+  const [credsFocus, setCredsFocus] = useState<PlatformKey | null>(null);
   const [deleting, setDeleting] = useState(false);
+
+  // The server allows credential writes for anyone with access to the client
+  // (admin, assignee, or creator — see enforceOwnership in server/auth.ts), and
+  // /api/clients only ever returns clients the user can access. So any client
+  // rendered here is one this user is permitted to configure.
+  const canManageCredentials = true;
+
+  function openCredentials(platform: PlatformKey | null = null) {
+    setCredsFocus(platform);
+    setShowCreds(true);
+  }
 
   const { data: credStatus } = useQuery<CredentialStatus>({
     queryKey: [`/api/clients/${client.id}/credentials`],
@@ -315,10 +358,11 @@ function ClientRow({ client, isDefault }: { client: ClientInfo; isDefault: boole
             </div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            {(isAdmin || client.createdBy === user?.id) && (
+            {canManageCredentials && (
               <Button
                 size="sm" variant="outline" className="h-7 text-xs gap-1"
-                onClick={(e) => { e.stopPropagation(); setShowCreds(true); }}
+                onClick={(e) => { e.stopPropagation(); openCredentials(); }}
+                data-testid="button-credentials"
               >
                 <KeyRound className="w-3 h-3" /> Credentials
               </Button>
@@ -359,13 +403,37 @@ function ClientRow({ client, isDefault }: { client: ClientInfo; isDefault: boole
               </div>
               <div>
                 <p className="text-muted-foreground uppercase tracking-wider mb-0.5">Credentials</p>
-                <div className="flex items-center gap-2">
-                  <span className={credStatus?.hasMeta ? "text-emerald-400" : "text-muted-foreground"}>
-                    Meta {credStatus?.hasMeta ? "✓" : "✗"}
-                  </span>
-                  <span className={credStatus?.hasGoogle ? "text-emerald-400" : "text-muted-foreground"}>
-                    Google {credStatus?.hasGoogle ? "✓" : "✗"}
-                  </span>
+                <div className="flex items-center gap-3">
+                  {([
+                    { key: "meta" as const, label: "Meta", configured: credStatus?.hasMeta, Icon: Facebook, iconClass: "text-blue-400" },
+                    { key: "google" as const, label: "Google", configured: credStatus?.hasGoogle, Icon: Globe, iconClass: "text-amber-400" },
+                  ]).map(({ key, label, configured, Icon, iconClass }) => {
+                    const status = `${label} ${configured ? "✓" : "✗"}`;
+                    if (!canManageCredentials) {
+                      return (
+                        <span key={key} className={configured ? "text-emerald-400" : "text-muted-foreground"}>
+                          {status}
+                        </span>
+                      );
+                    }
+                    return (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); openCredentials(key); }}
+                        title={`${configured ? "Edit" : "Add"} ${label} credentials`}
+                        aria-label={`${configured ? "Edit" : "Add"} ${label} credentials`}
+                        data-testid={`button-edit-${key}-credentials`}
+                        className="group flex items-center gap-1 rounded px-1 -mx-1 py-0.5 hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-colors"
+                      >
+                        <Icon className={`w-3 h-3 shrink-0 ${iconClass}`} />
+                        <span className={configured ? "text-emerald-400" : "text-muted-foreground"}>
+                          {status}
+                        </span>
+                        <Edit2 className="w-2.5 h-2.5 text-muted-foreground/60 group-hover:text-foreground transition-colors" />
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
               {(client as any).targetLocations?.length > 0 && (
@@ -394,7 +462,13 @@ function ClientRow({ client, isDefault }: { client: ClientInfo; isDefault: boole
         )}
       </div>
 
-      {showCreds && <CredentialsPanel clientId={client.id} onClose={() => setShowCreds(false)} />}
+      {showCreds && (
+        <CredentialsPanel
+          clientId={client.id}
+          focusPlatform={credsFocus}
+          onClose={() => { setShowCreds(false); setCredsFocus(null); }}
+        />
+      )}
     </>
   );
 }
