@@ -1,5 +1,6 @@
 import { Switch, Route, Router, useLocation } from "wouter";
 import { useHashLocation } from "wouter/use-hash-location";
+import { useHashSearch } from "@/hooks/use-hash-search";
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
@@ -58,6 +59,29 @@ import { Badge } from "@/components/ui/badge";
 import { PerplexityAttribution } from "@/components/PerplexityAttribution";
 import { useLiveUpdates } from "@/hooks/use-live-updates";
 import { useNow } from "@/hooks/use-now";
+
+/**
+ * wouter's useHashLocation derives the path as `"/" + location.hash.replace(...)`, so
+ * it hands the router the query string as part of the PATH — `#/breakdowns?tab=Gender`
+ * matched against `<Route path="/breakdowns">` fails and falls through to NotFound.
+ * Any page that puts state in the hash query (breakdown tabs, campaign filters) 404'd
+ * the moment a param was set; the default tab only escaped it because setting a param
+ * back to its default deletes it from the URL entirely.
+ *
+ * Strip the search off the path before the router sees it, and expose the app's
+ * hash-aware search reader as wouter's searchHook (wouter reads `hook.searchHook`)
+ * so useSearch()/useSearchParams() report what's actually in the URL.
+ */
+const useHashLocationWithSearch = ((opts?: { ssrPath?: string }) => {
+  const [location, navigate] = useHashLocation(opts);
+  const queryStart = location.indexOf("?");
+  return [queryStart === -1 ? location : location.slice(0, queryStart), navigate];
+}) as typeof useHashLocation & {
+  hrefs: (href: string) => string;
+  searchHook: () => string;
+};
+useHashLocationWithSearch.hrefs = (href: string) => "#" + href;
+useHashLocationWithSearch.searchHook = useHashSearch;
 
 function RouteFallback() {
   return (
@@ -281,7 +305,7 @@ function App() {
       <QueryClientProvider client={queryClient}>
         <ThemeProvider>
           <TooltipProvider>
-            <Router hook={useHashLocation}>
+            <Router hook={useHashLocationWithSearch}>
               <AuthProvider>
                 <AuthGate />
               </AuthProvider>
