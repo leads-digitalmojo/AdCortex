@@ -153,7 +153,38 @@ export default function GoogleSearchTermsPage() {
   
   const stData: SearchTermsData | null = useMemo(() => {
     if (!data) return null;
-    return (data as any).search_terms_analysis || null;
+    const raw = (data as any).search_terms_analysis;
+    if (!raw) return null;
+
+    // The agent writes campaign_name / ad_group_name / junk_terms; this page was
+    // written against campaign / ad_group / negative_candidates. The names never
+    // matched, so the campaign dropdown came up empty, the campaign filter matched
+    // nothing, and the Junk tab rendered zero rows despite the agent finding them.
+    // Normalize once here so every tab, filter and sort below sees one shape.
+    const normalizeTerm = (t: any): SearchTermEntry => ({
+      ...t,
+      search_term: t.search_term || t.term || "",
+      campaign: t.campaign || t.campaign_name || "",
+      ad_group: t.ad_group || t.ad_group_name || "",
+    });
+    const asList = (v: any): SearchTermEntry[] =>
+      Array.isArray(v) ? v.map(normalizeTerm) : [];
+
+    return {
+      ...raw,
+      all_terms: asList(raw.all_terms),
+      high_value_terms: asList(raw.high_value_terms),
+      competitor_terms: asList(raw.competitor_terms),
+      negative_candidates: asList(raw.negative_candidates ?? raw.junk_terms),
+      ngram_patterns: Array.isArray(raw.ngram_patterns)
+        ? raw.ngram_patterns.map((ng: any) => ({
+            ...ng,
+            // Agent writes type: "2-gram"; the n-gram size toggle filters on `n`.
+            // Without this the toggle was inert and every size showed at once.
+            n: ng.n ?? (typeof ng.type === "string" ? parseInt(ng.type, 10) : undefined),
+          }))
+        : [],
+    };
   }, [data]);
 
   const campaigns = useMemo(() => {

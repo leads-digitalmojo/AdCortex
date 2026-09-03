@@ -202,14 +202,47 @@ const META_AD_COLS: ColDef[] = [
 
 // ─── processAd helper ───────────────────────────────────────────────
 
-function processAd(ad: any, campaignName: string, adsetName: string): AdsPanelCreative {
+/**
+ * Google's API only populates `ad.name` for a few ad types — a Responsive Search Ad
+ * has none, so the agent stores the literal string "Unknown" for every RSA. Fall
+ * through that to something identifiable rather than printing "Unknown" in the table.
+ */
+function adDisplayName(ad: any): string {
+  const raw = (ad.name || ad.ad_name || "").trim();
+  if (raw && raw.toLowerCase() !== "unknown") return raw;
+
+  const headline =
+    ad.headline ||
+    (Array.isArray(ad.headlines) ? ad.headlines[0]?.text || ad.headlines[0] : "");
+  if (headline) return String(headline);
+
+  const type = (ad.ad_type || "Ad").replace(/_/g, " ");
+  return ad.id ? `${type} · ${ad.id}` : type;
+}
+
+function processAd(
+  ad: any,
+  campaignName: string,
+  adsetName: string,
+  channelType?: string,
+): AdsPanelCreative {
+  // Prefer the campaign's real advertising_channel_type. The old check fell back to
+  // "does the campaign name contain 'search'", which dropped Demand Gen campaigns
+  // named things like "...-DemandGen-Conversions-P-Search-..." into the Search table.
+  const channel = (channelType || ad.channel_type || "").toUpperCase();
+  const isSearchAd = channel
+    ? channel === "SEARCH"
+    : ad.ad_type === "RSA" ||
+      ad.ad_type === "RESPONSIVE_SEARCH_AD" ||
+      (campaignName || "").toLowerCase().includes("search");
+
   return {
     id: ad.id || ad.ad_id || `${campaignName}-${adsetName}-${ad.name}`,
-    name: ad.name || ad.ad_name || ad.headline || "Untitled Ad",
+    name: adDisplayName(ad),
     campaignName: campaignName || "Unassigned Campaign",
     adsetName: adsetName || "Unassigned Group",
     isVideo: !!(ad.is_video || ad.ad_type === "VIDEO" || (ad.tsr && ad.tsr > 0)),
-    isSearch: ad.ad_type === "RSA" || ad.ad_type === "RESPONSIVE_SEARCH_AD" || (campaignName || "").toLowerCase().includes("search"),
+    isSearch: isSearchAd,
     format: ad.ad_type || (ad.is_video ? "Video" : "Static"),
     status: (ad.status || "ACTIVE").toUpperCase(),
     classification: ad.classification || "WATCH",
@@ -367,18 +400,37 @@ export default function AnalyticsAdsPage() {
     if (!data) return [];
     let list: AdsPanelCreative[] = [];
 
+    // Ads carry no channel type of their own, so resolve each one's campaign to get
+    // the authoritative SEARCH / DEMAND_GEN / DISPLAY split.
+    const channelByCampaign = new Map<string, string>();
+    ((data as any)?.campaigns || []).forEach((c: any) => {
+      const channel = c.channel_type || c.advertising_channel_type;
+      if (!channel) return;
+      if (c.id) channelByCampaign.set(String(c.id), channel);
+      if (c.name) channelByCampaign.set(c.name, channel);
+    });
+    const channelFor = (ad: any, campaignName: string) =>
+      channelByCampaign.get(String(ad.campaign_id || "")) ||
+      channelByCampaign.get(campaignName) ||
+      "";
+
     // Primary: creative_health array (preferred output from agent)
     const source = (data as any)?.creative_health || [];
     if (source.length > 0) {
-      list = source.map((c: any) => processAd(c, c.campaign_name || "", c.adset_name || c.ad_group_name || ""));
+      list = source.map((c: any) => {
+        const campaignName = c.campaign_name || "";
+        return processAd(c, campaignName, c.adset_name || c.ad_group_name || "", channelFor(c, campaignName));
+      });
     } else {
       // Fallback: walk campaign_audit → ad_groups → ads
       const campaigns = ((data as any)?.campaign_audit || (data as any)?.campaigns || []) as any[];
       campaigns.forEach((campaign) => {
         const groups = campaign.ad_sets || campaign.ad_groups || [];
+        const campaignName = campaign.campaign_name || campaign.name;
+        const channel = campaign.channel_type || campaign.advertising_channel_type || "";
         groups.forEach((group: any) => {
           (group.ads || []).forEach((ad: any) => {
-            list.push(processAd(ad, campaign.campaign_name || campaign.name, group.name || group.ad_group_name));
+            list.push(processAd(ad, campaignName, group.name || group.ad_group_name, channel));
           });
         });
       });

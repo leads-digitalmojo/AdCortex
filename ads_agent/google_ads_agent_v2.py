@@ -171,12 +171,20 @@ DATE_7D_AGO = TODAY - datetime.timedelta(days=7)
 DATE_14D_AGO = TODAY - datetime.timedelta(days=14)
 MTD_START = TODAY.replace(day=1)
 
+DATE_3D_AGO = TODAY - datetime.timedelta(days=3)
+
+# Each window must match the name on the button in the sidebar. These were shifted
+# one step long — "Weekly" returned 14 days, "Bi-weekly" returned 30, and "Monthly"
+# returned month-to-date — so every cadence reported a period other than its label.
+# `until` is YESTERDAY, not TODAY: today is still accumulating, and a partial day
+# drags CTR/CPL around for no reason. The Meta agent already ends on yesterday, so
+# this also makes the two platforms comparable.
 CADENCE_WINDOWS = {
-    "daily":        {"since": str(YESTERDAY), "until": str(YESTERDAY), "label": f"Yesterday ({YESTERDAY})"},
-    "twice_weekly": {"since": str(DATE_7D_AGO), "until": str(TODAY), "label": "Last 7 days"},
-    "weekly":       {"since": str(DATE_14D_AGO), "until": str(TODAY), "label": "Last 14 days"},
-    "biweekly":     {"since": str(DATE_30D_AGO), "until": str(TODAY), "label": "Last 30 days"},
-    "monthly":      {"since": str(MTD_START), "until": str(TODAY), "label": f"MTD ({MTD_START} to {TODAY})"},
+    "daily":        {"since": str(YESTERDAY),    "until": str(YESTERDAY), "label": f"Yesterday ({YESTERDAY})"},
+    "twice_weekly": {"since": str(DATE_3D_AGO),  "until": str(YESTERDAY), "label": f"Last 3 days ({DATE_3D_AGO} to {YESTERDAY})"},
+    "weekly":       {"since": str(DATE_7D_AGO),  "until": str(YESTERDAY), "label": f"Last 7 days ({DATE_7D_AGO} to {YESTERDAY})"},
+    "biweekly":     {"since": str(DATE_14D_AGO), "until": str(YESTERDAY), "label": f"Last 14 days ({DATE_14D_AGO} to {YESTERDAY})"},
+    "monthly":      {"since": str(DATE_30D_AGO), "until": str(YESTERDAY), "label": f"Last 30 days ({DATE_30D_AGO} to {YESTERDAY})"},
 }
 
 # ── Monthly Targets (defaults, overridden by config.json) ──
@@ -435,6 +443,21 @@ KNOWN_COMPETITORS = [
 
 TARGET_LOCATIONS = ["Hyderabad", "Secunderabad", "Telangana"]
 TARGET_LOCATION_PATTERNS = ["hyderabad", "secunderabad", "telangana", "hyd"]
+
+# Display/Demand Gen placements run to tens of thousands of sites and apps per
+# account; only the top spenders are actionable, and keeping all of them would bloat
+# every cadence file.
+PLACEMENT_ROW_LIMIT = 300
+
+# geoTargetConstant id -> readable name. Google returns geo segments as bare resource
+# names, so without a lookup the Location breakdown would read "Location 1007740".
+# Seeded with the geos these accounts actually target; unknown ids fall back to the id.
+GEO_LABEL_CACHE = {
+    "1007740": "Hyderabad",
+    "9040231": "Secunderabad",
+    "2356": "India",
+    "20130": "Telangana",
+}
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━ UTILITY HELPERS ━━━━━━━━━━━━━━━━━━━━━━━
@@ -1149,9 +1172,21 @@ def extract_ad(row):
     tsr = p25 # Thumb Stop proxy
     vhr = safe_div(p50, p25) * 100 if p25 > 0 else 0 # Hold Rate proxy
 
+    # Google only sets ad.name for a handful of ad types — an RSA has none, so every
+    # search ad was landing in the UI as the literal string "Unknown". Fall back to
+    # the ad's first headline, then to type + id, so a row is always identifiable.
+    ad_name = (ad.get("name") or "").strip()
+    if not ad_name and ad_type == "RESPONSIVE_SEARCH_AD":
+        rsa_headlines = ad.get("responsiveSearchAd", {}).get("headlines", [])
+        if rsa_headlines:
+            ad_name = (rsa_headlines[0].get("text") or "").strip()
+    if not ad_name:
+        ad_id = ad.get("id", "")
+        ad_name = f"{ad_type.replace('_', ' ').title()} {ad_id}".strip() if ad_id else "Unnamed ad"
+
     return {
         "id": ad.get("id", ""),
-        "name": ad.get("name", "Unknown"),
+        "name": ad_name,
         "status": ad_group_ad.get("status", "UNKNOWN"),
         "ad_type": ad_type,
         "ad_strength": ad_strength,
@@ -1159,6 +1194,10 @@ def extract_ad(row):
         "ad_group_name": ag.get("name", ""),
         "campaign_id": camp.get("id", ""),
         "campaign_name": camp.get("name", ""),
+        # Selected by AD_FIELDS but never carried through, so the Ads panel had to
+        # guess Search vs Demand Gen from the campaign name — and campaigns named
+        # "...DemandGen...Search..." guessed wrong.
+        "channel_type": camp.get("advertisingChannelType", ""),
         "impressions": impressions,
         "clicks": clicks,
         "spend": cost,
@@ -3495,6 +3534,152 @@ def _compute_ngrams(terms_data):
 
 # ━━━━━━━━━━━━━ MODULE 16: DEMOGRAPHIC BREAKDOWNS ━━━━━━━━━━━━━━━━
 
+def _resolve_audience_names():
+    """Build resource-name -> readable-name maps for audience criteria.
+
+    ad_group_audience_view returns criteria as resource names
+    ("userLists/123", "userInterests/80456"), so without these lookups every
+    audience row would render as an opaque id.
+    """
+    names = {}
+
+    lookups = [
+        ("user_list", "SELECT user_list.resource_name, user_list.name FROM user_list", "userList"),
+        ("user_interest",
+         "SELECT user_interest.resource_name, user_interest.name FROM user_interest",
+         "userInterest"),
+        ("custom_audience",
+         "SELECT custom_audience.resource_name, custom_audience.name FROM custom_audience",
+         "customAudience"),
+    ]
+
+    for label, gaql, key in lookups:
+        try:
+            rows = get_report(label, query=gaql)
+            if not isinstance(rows, list):
+                continue
+            for r in rows:
+                entry = r.get(key, {})
+                resource = entry.get("resourceName") or entry.get("resource_name")
+                name = entry.get("name")
+                if resource and name:
+                    names[resource] = name
+        except Exception as e:  # a missing lookup must not sink the whole module
+            print(f"  [WARN] Could not resolve {label} names: {str(e)[:120]}")
+
+    return names
+
+
+def analyze_audiences(cadence_window=None):
+    """Per-audience-segment performance, not per-campaign.
+
+    The Audiences and DG Audiences pages had no audience-level data to read, so both
+    fell back to listing campaigns — a campaign name showed where an audience name
+    belonged. This pulls what each ad group actually targets (remarketing lists,
+    in-market and affinity segments, custom audiences, life events) with its own
+    metrics, so a campaign running three segments reports as three rows.
+    """
+    since = cadence_window.get("since") if cadence_window else str(DATE_7D_AGO)
+    until = cadence_window.get("until") if cadence_window else str(TODAY)
+
+    print("  Fetching audience segments...")
+    audience_gaql = (
+        "SELECT campaign.id, campaign.name, campaign.advertising_channel_type, "
+        "ad_group.id, ad_group.name, "
+        "ad_group_criterion.criterion_id, ad_group_criterion.type, "
+        "ad_group_criterion.user_list.user_list, "
+        "ad_group_criterion.user_interest.user_interest_category, "
+        "ad_group_criterion.custom_audience.custom_audience, "
+        # detailed_demographic and life_event are not selectable on this view in
+        # v25 — including them fails the whole query with UNRECOGNIZED_FIELD.
+        # Those criterion types still arrive, just without a resource reference,
+        # and fall back to their type label below.
+        "metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions "
+        "FROM ad_group_audience_view "
+        f"WHERE segments.date BETWEEN '{since}' AND '{until}'"
+    )
+
+    raw = get_report("ad_group_audience_view", since=since, until=until, query=audience_gaql)
+    if isinstance(raw, dict) and "_error" in raw:
+        print(f"  [WARN] Audience segments unavailable: {str(raw['_error'])[:200]}")
+        return {"status": "unavailable", "error": str(raw["_error"])[:500],
+                "audiences": [], "by_campaign": {}, "segment_count": 0}
+    if not isinstance(raw, list):
+        return {"status": "unavailable", "audiences": [], "by_campaign": {}, "segment_count": 0}
+
+    name_map = _resolve_audience_names() if raw else {}
+
+    # Criterion type -> (readable label, field holding the resource reference)
+    CRITERION_FIELDS = {
+        "USER_LIST": ("Remarketing", "userList", "userList"),
+        "USER_INTEREST": ("Affinity / In-Market", "userInterest", "userInterestCategory"),
+        "CUSTOM_AUDIENCE": ("Custom Audience", "customAudience", "customAudience"),
+        "DETAILED_DEMOGRAPHIC": ("Detailed Demographic", "detailedDemographic", "detailedDemographic"),
+        "LIFE_EVENT": ("Life Event", "lifeEvent", "lifeEvent"),
+    }
+
+    aggregated = {}
+    for r in raw:
+        camp = r.get("campaign", {})
+        ag = r.get("adGroup", r.get("ad_group", {}))
+        crit = r.get("adGroupCriterion", r.get("ad_group_criterion", {}))
+        metrics = r.get("metrics", {})
+
+        crit_type = crit.get("type", "UNKNOWN")
+        label, block_key, ref_key = CRITERION_FIELDS.get(
+            crit_type, (crit_type.replace("_", " ").title(), None, None)
+        )
+
+        resource = ""
+        if block_key:
+            resource = crit.get(block_key, {}).get(ref_key, "") or ""
+        audience_name = name_map.get(resource) or (
+            f"{label} {resource.rsplit('/', 1)[-1]}" if resource else label
+        )
+
+        key = (camp.get("id", ""), ag.get("id", ""), resource or audience_name)
+        entry = aggregated.setdefault(key, {
+            "campaign_id": camp.get("id", ""),
+            "campaign_name": camp.get("name", ""),
+            "channel_type": camp.get("advertisingChannelType", ""),
+            "ad_group_id": ag.get("id", ""),
+            "ad_group_name": ag.get("name", ""),
+            "audience_name": audience_name,
+            "audience_type": label,
+            "criterion_id": crit.get("criterionId", crit.get("criterion_id", "")),
+            "impressions": 0, "clicks": 0, "cost": 0.0, "conversions": 0.0,
+        })
+        entry["impressions"] += si(metrics.get("impressions"))
+        entry["clicks"] += si(metrics.get("clicks"))
+        entry["cost"] += micros_to_inr(metrics.get("costMicros"))
+        entry["conversions"] += sf(metrics.get("conversions"))
+
+    audiences = []
+    for entry in aggregated.values():
+        entry["cost"] = round(entry["cost"], 2)
+        entry["ctr"] = round(safe_div(entry["clicks"], entry["impressions"]) * 100, 2)
+        entry["cvr"] = round(safe_div(entry["conversions"], entry["clicks"]) * 100, 2)
+        entry["cpl"] = round(safe_div(entry["cost"], entry["conversions"]), 2)
+        entry["cpm"] = round(safe_div(entry["cost"], entry["impressions"]) * 1000, 2)
+        entry["avg_cpc"] = round(safe_div(entry["cost"], entry["clicks"]), 2)
+        audiences.append(entry)
+
+    audiences.sort(key=lambda a: a["cost"], reverse=True)
+
+    by_campaign = defaultdict(list)
+    for a in audiences:
+        by_campaign[a["campaign_id"]].append(a)
+
+    print(f"  {len(audiences)} audience segments across {len(by_campaign)} campaigns")
+
+    return {
+        "status": "ok",
+        "segment_count": len(audiences),
+        "audiences": audiences,
+        "by_campaign": dict(by_campaign),
+    }
+
+
 def analyze_breakdowns(campaigns, cadence_window=None):
     """Fetch age, gender, device breakdowns at campaign level."""
     since = cadence_window.get("since") if cadence_window else str(DATE_7D_AGO)
@@ -3504,6 +3689,8 @@ def analyze_breakdowns(campaigns, cadence_window=None):
         "device": [],
         "age": [],
         "gender": [],
+        "location": [],
+        "placement": [],
     }
 
     # Device breakdown
@@ -3560,6 +3747,10 @@ def analyze_breakdowns(campaigns, cadence_window=None):
             conversions = sf(metrics.get("conversions"))
             breakdowns["age"].append({
                 "campaign_name": camp.get("name", ""),
+                # The GAQL already selects campaign.id; dropping it here is what made
+                # the Breakdowns page go blank on the Age tab whenever a specific
+                # campaign was selected (it filters on campaign_id).
+                "campaign_id": camp.get("id", ""),
                 "age_range": age_type,
                 "impressions": impressions,
                 "clicks": clicks,
@@ -3591,6 +3782,7 @@ def analyze_breakdowns(campaigns, cadence_window=None):
             conversions = sf(metrics.get("conversions"))
             breakdowns["gender"].append({
                 "campaign_name": camp.get("name", ""),
+                "campaign_id": camp.get("id", ""),
                 "gender": gender_type,
                 "impressions": impressions,
                 "clicks": clicks,
@@ -3601,6 +3793,93 @@ def analyze_breakdowns(campaigns, cadence_window=None):
                 "cpl": round(safe_div(cost, conversions), 2),
             })
 
+    # Location breakdown — the Breakdowns page has always had a Location tab, but
+    # nothing ever populated it, so it read as permanently broken.
+    print("  Fetching location breakdown...")
+    location_gaql = (
+        "SELECT campaign.name, campaign.id, "
+        "geographic_view.country_criterion_id, geographic_view.location_type, "
+        "segments.geo_target_city, segments.geo_target_region, "
+        "metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions "
+        "FROM geographic_view "
+        f"WHERE segments.date BETWEEN '{since}' AND '{until}'"
+    )
+    raw_location = get_report("geographic_view", since=since, until=until, query=location_gaql)
+    if isinstance(raw_location, list):
+        for r in raw_location:
+            segments = r.get("segments", {})
+            metrics = r.get("metrics", {})
+            camp = r.get("campaign", {})
+            # geo_target_city/region come back as resource names
+            # ("geoTargetConstants/1007751"); resolve to a readable label where the
+            # geo analysis already cached one, else fall back to the raw id.
+            city = segments.get("geoTargetCity") or segments.get("geo_target_city") or ""
+            region = segments.get("geoTargetRegion") or segments.get("geo_target_region") or ""
+            location_label = _resolve_geo_label(city) or _resolve_geo_label(region) or "Unknown"
+            impressions = si(metrics.get("impressions"))
+            clicks = si(metrics.get("clicks"))
+            cost = micros_to_inr(metrics.get("costMicros"))
+            conversions = sf(metrics.get("conversions"))
+            breakdowns["location"].append({
+                "campaign_name": camp.get("name", ""),
+                "campaign_id": camp.get("id", ""),
+                "location": location_label,
+                "is_target_location": is_target_location(location_label),
+                "impressions": impressions,
+                "clicks": clicks,
+                "cost": round(cost, 2),
+                "conversions": conversions,
+                "ctr": round(safe_div(clicks, impressions) * 100, 2),
+                "cvr": round(safe_div(conversions, clicks) * 100, 2),
+                "cpl": round(safe_div(cost, conversions), 2),
+            })
+
+    # Placement breakdown — where Display/Demand Gen impressions actually ran.
+    # Only meaningful for non-Search inventory; Search campaigns return nothing here.
+    print("  Fetching placement breakdown...")
+    placement_gaql = (
+        "SELECT campaign.name, campaign.id, "
+        "detail_placement_view.display_name, detail_placement_view.placement_type, "
+        "metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions "
+        "FROM detail_placement_view "
+        f"WHERE segments.date BETWEEN '{since}' AND '{until}'"
+    )
+    raw_placement = get_report("detail_placement_view", since=since, until=until, query=placement_gaql)
+    if isinstance(raw_placement, list):
+        # The Display/Demand Gen network reports tens of thousands of individual
+        # sites and apps — one real account returned 47k rows. Aggregate per
+        # campaign+placement and keep only the ones carrying real spend, so the
+        # analysis file stays a reasonable size and the table stays readable.
+        placement_agg = {}
+        for r in raw_placement:
+            metrics = r.get("metrics", {})
+            camp = r.get("campaign", {})
+            view = r.get("detailPlacementView", r.get("detail_placement_view", {}))
+            placement = view.get("displayName") or view.get("display_name") or "Unknown"
+
+            key = (camp.get("id", ""), placement)
+            entry = placement_agg.setdefault(key, {
+                "campaign_name": camp.get("name", ""),
+                "campaign_id": camp.get("id", ""),
+                "placement": placement,
+                "placement_type": view.get("placementType") or view.get("placement_type") or "",
+                "impressions": 0, "clicks": 0, "cost": 0.0, "conversions": 0.0,
+            })
+            entry["impressions"] += si(metrics.get("impressions"))
+            entry["clicks"] += si(metrics.get("clicks"))
+            entry["cost"] += micros_to_inr(metrics.get("costMicros"))
+            entry["conversions"] += sf(metrics.get("conversions"))
+
+        ranked = sorted(placement_agg.values(), key=lambda p: p["cost"], reverse=True)
+        for entry in ranked[:PLACEMENT_ROW_LIMIT]:
+            entry["cost"] = round(entry["cost"], 2)
+            entry["ctr"] = round(safe_div(entry["clicks"], entry["impressions"]) * 100, 2)
+            entry["cvr"] = round(safe_div(entry["conversions"], entry["clicks"]) * 100, 2)
+            entry["cpl"] = round(safe_div(entry["cost"], entry["conversions"]), 2)
+            breakdowns["placement"].append(entry)
+        if len(ranked) > PLACEMENT_ROW_LIMIT:
+            print(f"    (kept top {PLACEMENT_ROW_LIMIT} of {len(ranked)} placements by spend)")
+
     # Generate insights from breakdowns
     insights = _generate_breakdown_insights(breakdowns)
 
@@ -3608,8 +3887,26 @@ def analyze_breakdowns(campaigns, cadence_window=None):
         "device": breakdowns["device"],
         "age": breakdowns["age"],
         "gender": breakdowns["gender"],
+        "location": breakdowns["location"],
+        "placement": breakdowns["placement"],
         "insights": insights,
     }
+
+
+def _resolve_geo_label(value):
+    """Turn a geoTargetConstants/<id> resource name into a readable location.
+
+    The geo analysis pass already builds an id -> name map for the account's target
+    locations; reuse it when we can and fall back to the bare id so a row is never
+    silently dropped.
+    """
+    if not value:
+        return ""
+    text = str(value)
+    if "geoTargetConstants/" not in text:
+        return text
+    geo_id = text.rsplit("/", 1)[-1]
+    return GEO_LABEL_CACHE.get(geo_id, f"Location {geo_id}")
 
 
 def _generate_breakdown_insights(breakdowns):
@@ -4119,6 +4416,10 @@ def run_analysis(cadence="twice_weekly"):
             if isinstance(data, list):
                 print(f"  {dim}: {len(data)} segments analyzed")
 
+    # 13b. Audience Segments (always — the audience pages have no other source)
+    print("\n--- Module 13b: Audience Segments ---")
+    audience_analysis = analyze_audiences(cadence_window=window)
+
     # 14. Frequency Audit (always)
     print("\n--- Module 14: Frequency Audit ---")
     frequency_audit = analyze_frequency_audit(ds["campaigns"], cadence_window=window)
@@ -4285,6 +4586,7 @@ def run_analysis(cadence="twice_weekly"):
         "quality_score_analysis": qs_analysis,
         "search_terms_analysis": search_terms_analysis,
         "demographic_breakdowns": breakdowns,
+        "audience_analysis": audience_analysis,
         "frequency_audit": frequency_audit,
         "recommendations": recommendations,
         "benchmarks": BENCHMARKS,

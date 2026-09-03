@@ -390,6 +390,7 @@ export default function CampaignsPage() {
     { key: "clicks" as SortKey, label: "Clicks", align: "right" },
     { key: "leads" as SortKey, label: "Leads", align: "right" },
     { key: "ctr" as SortKey, label: "CTR", align: "right" },
+    { key: "avg_cpc" as SortKey, label: "CPC", align: "right" },
     { key: "cvr" as SortKey, label: "CVR", align: "right" },
     { key: "cpl" as SortKey, label: "CPL", align: "right" },
     { key: "quality_score" as SortKey, label: "QS", align: "right" },
@@ -411,6 +412,7 @@ export default function CampaignsPage() {
     { key: "tsr" as SortKey, label: "TSR", align: "right" },
     { key: "vhr" as SortKey, label: "VHR", align: "right" },
     { key: "ctr" as SortKey, label: "CTR", align: "right" },
+    { key: "avg_cpc" as SortKey, label: "CPC", align: "right" },
     { key: "cvr" as SortKey, label: "CVR", align: "right" },
     { key: "cpl" as SortKey, label: "CPL", align: "right" },
   ];
@@ -501,11 +503,15 @@ export default function CampaignsPage() {
       if (impressions === 0 && ["ctr", "cvr"].includes(col.key as string)) return <td key={col.key} className="p-3 text-right text-muted-foreground text-xs">No Delivery</td>;
 
       if (typeof val === "number") {
-        const pctValue = val < 1 && val > 0 ? val * 100 : val;
+        // The agent already stores these as percentages (it multiplies by 100 in
+        // extract_campaign). Do NOT "helpfully" rescale values below 1 — Demand Gen
+        // campaigns legitimately run at 0.7–0.9% CTR, and treating those as fractions
+        // rendered them as 70–90%.
+        const pctValue = val;
         displayVal = `${pctValue.toFixed(col.key === "ctr" ? 2 : 1)}%`;
 
         if (col.key === "ctr") {
-          const rawCtr = val < 1 ? val : val / 100;
+          const rawCtr = val / 100;
           colorClass = rawCtr >= (isSearch ? 0.015 : 0.008) ? "text-emerald-400" : rawCtr >= 0.004 ? "text-amber-400" : "text-red-400";
         } else if (col.key === "search_budget_lost_is") {
           colorClass = pctValue > 30 ? "text-red-400" : pctValue > 10 ? "text-amber-400" : "text-emerald-400";

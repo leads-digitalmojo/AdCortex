@@ -100,7 +100,7 @@ function pct(v: number): string {
 
 // ─── Ad Group Sub-Table ───────────────────────────────────────────────────────
 
-function AdGroupSubTable({ adGroups, targetCpl }: { adGroups: DgAdGroup[]; targetCpl: number }) {
+function AdGroupSubTable({ adGroups, targetCpl, label = "Ad Group" }: { adGroups: DgAdGroup[]; targetCpl: number; label?: string }) {
   if (adGroups.length === 0) return null;
   return (
     <tr>
@@ -109,7 +109,7 @@ function AdGroupSubTable({ adGroups, targetCpl }: { adGroups: DgAdGroup[]; targe
           <table className="w-full text-xs">
             <thead>
               <tr className="bg-muted/20 border-b border-border/20">
-                <th className="px-3 py-1.5 text-left t-label text-muted-foreground font-bold uppercase tracking-wider w-[280px]">Ad Group</th>
+                <th className="px-3 py-1.5 text-left t-label text-muted-foreground font-bold uppercase tracking-wider w-[280px]">{label}</th>
                 <th className="px-3 py-1.5 text-right t-label text-muted-foreground font-bold uppercase tracking-wider">Impressions</th>
                 <th className="px-3 py-1.5 text-right t-label text-muted-foreground font-bold uppercase tracking-wider">Clicks</th>
                 <th className="px-3 py-1.5 text-right t-label text-muted-foreground font-bold uppercase tracking-wider">CTR</th>
@@ -157,9 +157,12 @@ function AdGroupSubTable({ adGroups, targetCpl }: { adGroups: DgAdGroup[]; targe
 
 // ─── Campaign Row ─────────────────────────────────────────────────────────────
 
-function DgCampaignRow({ camp, targetCpl }: { camp: DgCampaign; targetCpl: number }) {
+function DgCampaignRow({ camp, targetCpl, audienceSegments }: { camp: DgCampaign; targetCpl: number; audienceSegments?: DgAdGroup[] }) {
   const [expanded, setExpanded] = useState(false);
-  const adGroups = camp.ad_groups || [];
+  // Prefer the real audience segments this campaign targets. Ad groups are only the
+  // fallback for accounts where the audience view returned nothing.
+  const hasSegments = !!audienceSegments && audienceSegments.length > 0;
+  const adGroups = hasSegments ? audienceSegments! : (camp.ad_groups || []);
   const audienceType = getAudienceType(camp);
   const classBadge = getClassBadge(camp.classification);
   const action = getAction(camp, targetCpl);
@@ -304,8 +307,14 @@ function DgCampaignRow({ camp, targetCpl }: { camp: DgCampaign; targetCpl: numbe
         </td>
       </tr>
 
-      {/* Expanded ad groups */}
-      {expanded && <AdGroupSubTable adGroups={adGroups} targetCpl={targetCpl} />}
+      {/* Expanded: audience segments where available, else ad groups */}
+      {expanded && (
+        <AdGroupSubTable
+          adGroups={adGroups}
+          targetCpl={targetCpl}
+          label={hasSegments ? "Audience Segment" : "Ad Group"}
+        />
+      )}
     </>
   );
 }
@@ -339,6 +348,33 @@ export default function GoogleAudiencesPage() {
         ad_groups: c.ad_groups || [],
         classification: c.classification,
       }));
+  }, [data]);
+
+  // Real audience segments per campaign, keyed by campaign id. Until the agent
+  // started collecting these, this page could only list campaigns — which is why a
+  // campaign running three segments showed as a single undifferentiated row.
+  const segmentsByCampaign = useMemo((): Record<string, DgAdGroup[]> => {
+    const analysis = (data as any)?.audience_analysis;
+    const byCampaign = analysis?.by_campaign;
+    if (!byCampaign) return {};
+    const out: Record<string, DgAdGroup[]> = {};
+    Object.entries(byCampaign).forEach(([campaignId, segments]) => {
+      out[String(campaignId)] = (segments as any[]).map((s) => ({
+        id: s.criterion_id,
+        name: s.audience_type && s.audience_type !== s.audience_name
+          ? `${s.audience_name} · ${s.audience_type}`
+          : s.audience_name,
+        impressions: s.impressions || 0,
+        clicks: s.clicks || 0,
+        cost: s.cost || 0,
+        conversions: s.conversions || 0,
+        ctr: s.ctr || 0,
+        avg_cpc: s.avg_cpc || 0,
+        cvr: s.cvr || 0,
+        cpl: s.cpl || 0,
+      }));
+    });
+    return out;
   }, [data]);
 
   const targetCpl: number = useMemo(() => {
@@ -502,7 +538,12 @@ export default function GoogleAudiencesPage() {
             </thead>
             <tbody>
               {dgCampaigns.map((camp, i) => (
-                <DgCampaignRow key={camp.id || i} camp={camp} targetCpl={targetCpl} />
+                <DgCampaignRow
+                  key={camp.id || i}
+                  camp={camp}
+                  targetCpl={targetCpl}
+                  audienceSegments={segmentsByCampaign[String(camp.id)]}
+                />
               ))}
               {dgCampaigns.length === 0 && (
                 <tr>

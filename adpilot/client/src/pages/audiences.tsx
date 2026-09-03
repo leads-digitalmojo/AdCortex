@@ -102,7 +102,28 @@ export default function AudiencesPage() {
       }));
     }
 
-    // GOOGLE: fall back to campaigns
+    // GOOGLE: the audience segments each ad group targets — remarketing lists,
+    // in-market/affinity segments, custom audiences. One row per segment, with the
+    // campaign it runs under alongside it.
+    const segments: any[] = (data as any).audience_analysis?.audiences || [];
+    if (segments.length > 0) {
+      return segments.map((s: any) => ({
+        name: s.audience_name || "Unnamed audience",
+        type: s.audience_type || "Audience",
+        campaign: s.campaign_name,
+        spend: s.cost || 0,
+        impressions: s.impressions || 0,
+        clicks: s.clicks || 0,
+        leads: s.conversions || 0,
+        cpl: s.cpl || 0,
+        ctr: s.ctr || 0,
+        cpc: s.avg_cpc || 0,
+      }));
+    }
+
+    // Last resort for accounts whose audience view returned nothing (or data
+    // written before the agent collected segments): list campaigns, but say so,
+    // rather than presenting campaign names as if they were audiences.
     const campaigns: any[] = (data as any).campaigns || [];
     if (campaigns.length > 0) {
       return campaigns.map((c: any) => ({

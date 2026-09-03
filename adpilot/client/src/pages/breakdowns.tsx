@@ -162,9 +162,40 @@ function computeBreakdownScore(row: any, target: number, ctrBenchmark: number, t
   };
 }
 
+/**
+ * A CPL computed from one or two conversions is noise, not signal — a segment with
+ * 3 clicks and 1 lead was scoring as "Scale / Increase budget", and one with 20
+ * impressions and no leads as "Reduce spend / Pause". Require enough traffic to
+ * have earned an opinion before showing a directional call.
+ */
+const MIN_CLICKS_FOR_CALL = 25;
+const MIN_IMPRESSIONS_FOR_CALL = 500;
+const MIN_LEADS_FOR_CPL_CALL = 3;
+
+function hasEnoughData(row: any) {
+  const clicks = row.clicks || 0;
+  const impressions = row.impressions || 0;
+  const leads = row.leads ?? row.conversions ?? 0;
+  // Either enough conversions to trust the CPL, or enough traffic to trust that the
+  // absence of conversions is real rather than a small-sample artifact.
+  return leads >= MIN_LEADS_FOR_CPL_CALL ||
+    (clicks >= MIN_CLICKS_FOR_CALL && impressions >= MIN_IMPRESSIONS_FOR_CALL);
+}
+
 function getRecommendationType(row: any, score: number, tabName: string, isTarget?: boolean) {
   if (tabName === "Region" && isTarget === false && row.spend > 0) {
     return { type: "exclude", text: "Pause / Exclude", color: "text-red-500", lightBg: "bg-red-500/10", border: "border-red-500/20", reason: "Outside target geography" };
+  }
+  if (!hasEnoughData(row)) {
+    const leads = row.leads ?? row.conversions ?? 0;
+    return {
+      type: "insufficient",
+      text: "Insufficient data",
+      color: "text-muted-foreground",
+      lightBg: "bg-muted",
+      border: "border-transparent",
+      reason: `Only ${formatNumber(row.clicks || 0)} clicks and ${leads % 1 === 0 ? leads : leads.toFixed(1)} conversions in this window — too few to judge`,
+    };
   }
   if (score >= 75) return { type: "scale", text: "Scale / Increase budget", color: "text-emerald-500", lightBg: "bg-emerald-500/10", border: "border-emerald-500/20", reason: "Top tier performance" };
   if (score >= 40) return { type: "monitor", text: "Monitor / Optimize", color: "text-amber-500", lightBg: "bg-amber-500/10", border: "border-amber-500/20", reason: "Average performance" };
@@ -441,9 +472,15 @@ function MetaBreakdowns({ clientId, analysisData, isLoadingAnalysis, analysisErr
                             <div className={cn("p-5 rounded-xl border bg-background/80 shadow-sm space-y-2", health.border)}>
                               <p className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Expert Recommendation:</p>
                               <p className="text-base font-medium text-foreground leading-relaxed">
-                                System indicates <span className={cn("font-bold", rec.color)}>{rec.text}</span> because {rec.reason.toLowerCase()}. 
-                                Efficiency Score of <span className={cn("font-bold", health.color)}>{score.total}/100</span> suggests this segment is 
-                                {score.total >= 60 ? " prime for budget acceleration or stabilization." : " currently underperforming relative to account-wide benchmarks and requires intervention."}
+                                System indicates <span className={cn("font-bold", rec.color)}>{rec.text}</span> because {rec.reason.toLowerCase()}.
+                                {rec.type === "insufficient" ? (
+                                  <> Efficiency Score is withheld until this segment accumulates enough traffic to score reliably.</>
+                                ) : (
+                                  <>
+                                    {" "}Efficiency Score of <span className={cn("font-bold", health.color)}>{score.total}/100</span> suggests this segment is
+                                    {score.total >= 60 ? " prime for budget acceleration or stabilization." : " currently underperforming relative to account-wide benchmarks and requires intervention."}
+                                  </>
+                                )}
                               </p>
                             </div>
                           </div>
@@ -502,10 +539,22 @@ function GoogleBreakdowns({ clientId, analysisData, isLoadingAnalysis, analysisE
     // Each key contains a flat array of records for ALL campaigns.
     const allRecords = data.breakdowns[tabKey] || [];
 
-    // 1. Filter by selected campaign if not ACCOUNT_OVERVIEW
+    // 1. Filter by selected campaign if not ACCOUNT_OVERVIEW.
+    // Only the device rows carry campaign_id — the age and gender rows the agent
+    // writes have campaign_name only, so an id-only match emptied those two tabs
+    // whenever a specific campaign was selected. Resolve the id to a name and
+    // accept either.
+    const selectedCampaignName = selectedCampaign === ACCOUNT_OVERVIEW
+      ? ""
+      : ((analysisData?.campaigns || []).find(
+          (c: any) => String(c.id) === String(selectedCampaign),
+        )?.name || "");
+
     const filtered = selectedCampaign === ACCOUNT_OVERVIEW
       ? allRecords
-      : allRecords.filter((r: any) => r.campaign_id === selectedCampaign);
+      : allRecords.filter((r: any) =>
+          String(r.campaign_id || "") === String(selectedCampaign) ||
+          (!!selectedCampaignName && r.campaign_name === selectedCampaignName));
 
     // 2. Aggregate by dimension
     const aggregated: Record<string, GoogleBreakdownRow> = {};
@@ -547,7 +596,7 @@ function GoogleBreakdowns({ clientId, analysisData, isLoadingAnalysis, analysisE
       cpl: r.conversions > 0 ? r.cost / r.conversions : 0,
       cvr: r.clicks > 0 ? (r.conversions / r.clicks) * 100 : 0,
     }));
-  }, [data, tabKey, selectedCampaign]);
+  }, [data, tabKey, selectedCampaign, analysisData]);
 
   const rows = useMemo(() => {
     return [...rawRows].sort((a, b) => {
