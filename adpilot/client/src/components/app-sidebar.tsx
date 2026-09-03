@@ -82,6 +82,9 @@ const coreNavItems = [
   { title: "Adsets", url: "/adsets", icon: Layers },
   { title: "Ads Panel", url: "/analytics/ads", icon: Clapperboard },
   { title: "Breakdowns", url: "/breakdowns", icon: BarChart3 },
+  // Registered in App.tsx and adapts its copy to the active platform, but had no
+  // nav link anywhere — only reachable by typing the hash URL directly.
+  { title: "Audiences", url: "/audiences", icon: Users },
 ];
 
 const metaNavItems: { title: string; url: string; icon: any }[] = [];
@@ -91,7 +94,10 @@ const googleNavItems = [
   { title: "Keywords", url: "/keywords", icon: Search },
   { title: "Quality Score", url: "/google/quality-score", icon: BarChart3 },
   { title: "Search Terms", url: "/google/search-terms", icon: Target },
-  { title: "Audiences", url: "/google/audiences", icon: Users },
+  // Distinguished from coreNavItems' "Audiences" (/audiences, adset/campaign-level
+  // targeting groups) — this one is specifically Demand Gen audience type breakdown
+  // (Lookalike/In-Market/Affinity). Same label on both would be indistinguishable.
+  { title: "DG Audiences", url: "/google/audiences", icon: Users },
   { title: "Restructuring", url: "/google/restructuring", icon: GitBranch },
 ];
 
@@ -192,6 +198,7 @@ export function AppSidebar({ syncState, lastSynced }: AppSidebarProps) {
     activeCadence,
     setActiveCadence,
     apiBase,
+    isFetchingAnalysis,
   } = useClient();
   const { isAdmin } = useAuth();
 
@@ -394,7 +401,7 @@ export function AppSidebar({ syncState, lastSynced }: AppSidebarProps) {
                 <button
                   key={opt.value}
                   className={cn(
-                    "p-1.7 text-xs font-semibold rounded-md border-2 transition-colors duration-150",
+                    "relative p-1.7 text-xs font-semibold rounded-md border-2 transition-colors duration-150",
                     "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
                     isActive
                       ? "bg-primary/16 text-foreground border-primary/35 shadow-xs"
@@ -402,9 +409,18 @@ export function AppSidebar({ syncState, lastSynced }: AppSidebarProps) {
                   )}
                   onClick={() => setActiveCadence(opt.value)}
                   data-testid={`button-cadence-${opt.value}`}
-                  title={opt.value.replace(/_/g, " ")}
+                  title={
+                    isActive && isFetchingAnalysis
+                      ? "Loading this window's data…"
+                      : opt.value.replace(/_/g, " ")
+                  }
                 >
                   {opt.label}
+                  {/* Numbers on screen stay the PREVIOUS window's until this resolves
+                      (placeholderData) — this dot is the only cue a refetch is in flight. */}
+                  {isActive && isFetchingAnalysis && (
+                    <span className="absolute -top-1 -right-1 w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
+                  )}
                 </button>
               );
             })}

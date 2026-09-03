@@ -4,7 +4,7 @@ import { useClient } from "@/lib/client-context";
 import { apiRequest } from "@/lib/queryClient";
 import type { AnalysisData } from "@shared/schema";
 import { useNow } from "@/hooks/use-now";
-import { formatHoursAgo, parseSyncTimestamp } from "@/lib/sync-state";
+import { formatHoursAgo, parseSyncTimestamp, hoursSince, gradeStaleness } from "@/lib/sync-state";
 import { useToast } from "@/hooks/use-toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -1205,6 +1205,7 @@ export default function DashboardPage() {
     (data as any)?.timestamp ||
     null;
   const lastSuccessfulFetchDate = parseSyncTimestamp(lastSuccessfulFetch);
+  const dataStaleness = gradeStaleness(hoursSince(lastSuccessfulFetch, now));
 
   const analysisSummary = (data as any)?.summary || {
     total_fatigue_alerts: ((data as any)?.frequency_audit?.alerts || []).length,
@@ -1407,7 +1408,20 @@ export default function DashboardPage() {
                   : `Showing: ${cadenceDisplayMap[cadenceLabel] || "Last 7 Days"}`}
               </Badge>
               {lastSuccessfulFetchDate && (
-                <Badge variant="secondary" className="w-fit text-muted-foreground">
+                // Previously always rendered as muted secondary text regardless of age —
+                // "72h ago" and "2h ago" looked identically unimportant. Color now escalates
+                // with staleness so an old sync is visually distinct from a fresh one.
+                <Badge
+                  variant={dataStaleness === "stale" ? "destructive" : dataStaleness === "aging" ? "warning" : "secondary"}
+                  className={cn("w-fit", dataStaleness === "fresh" && "text-muted-foreground")}
+                  title={
+                    dataStaleness === "stale"
+                      ? "This data is more than 48 hours old — numbers on screen may not reflect recent account activity."
+                      : dataStaleness === "aging"
+                        ? "This data is more than 24 hours old."
+                        : undefined
+                  }
+                >
                   Data as of: {lastSuccessfulFetchDate.toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })} ({formatHoursAgo(lastSuccessfulFetch, now)})
                 </Badge>
               )}
@@ -1696,6 +1710,27 @@ export default function DashboardPage() {
         </section>
       )}
 
+      {/* Failed-sync warning WITH existing data on screen.
+          The banner further below only fires when spend AND campaign count are both
+          zero — so if today's agent run fails but yesterday's non-zero data is still
+          on disk, the dashboard previously rendered it completely normally with no
+          warning beyond the small "Data as of" badge above. A marketer could act on
+          days-old numbers believing the account is current. This is deliberately a
+          slim inline bar, not a full-page takeover, since the data IS still usable —
+          it just needs a visible caveat. */}
+      {syncState?.sync_status === "failed" && (rawCampaignAudit.length > 0 || displayAp.total_spend_30d > 0) && (
+        <section aria-labelledby="dashboard-stale-sync-warning">
+          <h2 id="dashboard-stale-sync-warning" className="sr-only">Sync failed, showing stale data</h2>
+          <div className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-red-500/10 border border-red-500/30">
+            <XCircle className="w-4 h-4 text-red-500 shrink-0" />
+            <span className="text-xs text-red-700 dark:text-red-400 font-medium">
+              The most recent sync attempt failed — you're viewing data from {formatHoursAgo(lastSuccessfulFetch, now) || "an earlier sync"}, not the latest account state.
+              {syncState?.error ? ` (${syncState.error})` : ""}
+            </span>
+          </div>
+        </section>
+      )}
+
       {/* New Entity Detection Banner */}
       {newEntities?.hasNewEntities && (
         <section aria-labelledby="dashboard-new-entities">
@@ -1715,20 +1750,20 @@ export default function DashboardPage() {
       {/* Zero/Failed Data State Banner */}
       {rawCampaignAudit.length === 0 && displayAp.total_spend_30d === 0 && (
         <section className="page-zone mb-6">
-          <Card className={`border-dashed border-2 ${syncState?.status === "failed" ? "border-red-500/30 bg-red-500/5" : "border-primary/20 bg-primary/5"}`}>
+          <Card className={`border-dashed border-2 ${syncState?.sync_status === "failed" ? "border-red-500/30 bg-red-500/5" : "border-primary/20 bg-primary/5"}`}>
             <CardContent className="flex flex-col items-center justify-center py-12 text-center">
-              <div className={`h-12 w-12 rounded-full flex items-center justify-center mb-4 ${syncState?.status === "failed" ? "bg-red-500/10" : "bg-primary/10"}`}>
-                {syncState?.status === "failed" ? (
+              <div className={`h-12 w-12 rounded-full flex items-center justify-center mb-4 ${syncState?.sync_status === "failed" ? "bg-red-500/10" : "bg-primary/10"}`}>
+                {syncState?.sync_status === "failed" ? (
                   <XCircle className="h-6 w-6 text-red-500" />
                 ) : (
                   <Database className="h-6 w-6 text-primary" />
                 )}
               </div>
               <h2 className="text-xl font-bold text-foreground">
-                {syncState?.status === "failed" ? "Data Synchronization Failed" : "No Performance Data Available"}
+                {syncState?.sync_status === "failed" ? "Data Synchronization Failed" : "No Performance Data Available"}
               </h2>
               <p className="text-base text-muted-foreground mt-2 max-w-md">
-                {syncState?.status === "failed"
+                {syncState?.sync_status === "failed"
                   ? "The last attempt to communicate with the advertising platform encountered an error. Please verify your connection settings or run the agent again."
                   : "We haven't received any campaigns or spend data for this client yet. Click 'Run Agent now' at the top to initiate the first extraction."}
               </p>

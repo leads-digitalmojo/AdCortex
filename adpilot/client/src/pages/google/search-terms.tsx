@@ -1,4 +1,5 @@
 import { useState, useMemo, useCallback, useEffect } from "react";
+import { useHashSearchParam } from "@/hooks/use-hash-search";
 import { useClient } from "@/lib/client-context";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -120,14 +121,22 @@ interface NegativeKeyword {
 }
 
 type TabId = "all" | "high_value" | "junk" | "competitors" | "ngrams" | "existing_negatives";
+const TAB_IDS: readonly TabId[] = ["all", "high_value", "junk", "competitors", "ngrams", "existing_negatives"];
+function isTabId(value: string): value is TabId {
+  return (TAB_IDS as readonly string[]).includes(value);
+}
 
 // ─── Component ───────────────────────────────────────────────────────
 
 export default function GoogleSearchTermsPage() {
-  const { analysisData: data, isLoadingAnalysis: isLoading, apiBase } = useClient();
+  const { analysisData: data, isLoadingAnalysis: isLoading, apiBase, activePlatform } = useClient();
   const { toast } = useToast();
 
-  const [activeTab, setActiveTab] = useState<TabId>("all");
+  // Survives a refresh instead of always resetting to the "All" tab. The URL is
+  // untrusted input (a hand-edited or stale link), so validate before trusting it
+  // as a TabId rather than casting the raw string.
+  const [rawActiveTab, setActiveTab] = useHashSearchParam("tab", "all");
+  const activeTab: TabId = isTabId(rawActiveTab) ? rawActiveTab : "all";
   const [searchFilter, setSearchFilter] = useState("");
   const [selectedCampaign, setSelectedCampaign] = useState<string>("all");
   const [sortKey, setSortKey] = useState<string>("cost");
@@ -565,6 +574,22 @@ export default function GoogleSearchTermsPage() {
     );
   }
 
+  // Checked before the generic empty state below: without this, switching to a
+  // Meta client/platform on this route reads as "Data Synchronization Pending" —
+  // implying the Google agent just hasn't run yet — instead of "wrong platform".
+  if (activePlatform !== "google") {
+    return (
+      <div className="p-6" data-testid="search-terms-meta-notice">
+        <Card className="bg-card/40 border-border/50">
+          <CardContent className="p-8 text-center">
+            <Search className="w-10 h-10 text-muted-foreground mx-auto mb-3" />
+            <p className="text-muted-foreground text-base">Search Terms analysis is available for Google Ads only.</p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
   // Empty state
   if (!stData) {
     return (
@@ -614,7 +639,11 @@ export default function GoogleSearchTermsPage() {
         <div className="flex items-center gap-3">
           {stData.junk_spend != null && (
             <Badge variant="outline" className="bg-red-500/10 text-red-500 border-red-500/30 font-bold px-3 py-1 text-xs uppercase tracking-wider rounded-lg">
-              Junk spend: {formatINR(stData.junk_spend, 0)} ({stData.junk_pct?.toFixed(1)}%)
+              {/* Guard was on junk_spend but this also renders junk_pct — the two
+                  fields can be present/absent independently, so a junk_spend with no
+                  junk_pct rendered the literal string "undefined%". */}
+              Junk spend: {formatINR(stData.junk_spend, 0)}
+              {typeof stData.junk_pct === "number" ? ` (${stData.junk_pct.toFixed(1)}%)` : ""}
             </Badge>
           )}
           {hasSelection && isTermTableTab && (

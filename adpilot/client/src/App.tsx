@@ -9,7 +9,7 @@ import { AppSidebar } from "@/components/app-sidebar";
 import { ThemeProvider } from "@/components/theme-provider";
 import { ClientProvider, useClient } from "@/lib/client-context";
 import { AuthProvider, useAuth } from "@/lib/auth-context";
-import { LogOut, Sparkles, AlertTriangle, User, Settings, Plus } from "lucide-react";
+import { LogOut, Sparkles, AlertTriangle, User, Settings, Plus, Loader2 } from "lucide-react";
 import { AddClientModal } from "@/components/add-client-modal";
 import {
   DropdownMenu,
@@ -103,7 +103,7 @@ function AppRouter() {
 
 function AppLayout() {
   useLiveUpdates();
-  const { analysisData, activeClient, activePlatformInfo, syncState } = useClient();
+  const { analysisData, activeClient, activePlatformInfo, syncState, isFetchingAnalysis } = useClient();
   const { user, logout } = useAuth();
   const [, setLocation] = useLocation();
   const [terminalOpen, setTerminalOpen] = useState(false);
@@ -153,6 +153,16 @@ function AppLayout() {
               {analysisData?.agent_version && (
                 <span className="text-xs font-medium text-muted-foreground hidden md:inline">
                   {analysisData.agent_version}
+                </span>
+              )}
+              {isFetchingAnalysis && (
+                <span
+                  className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground"
+                  data-testid="text-refreshing-indicator"
+                  title="Fetching the latest data for the current client, platform, and time window — numbers on screen may still be from the previous selection."
+                >
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  <span className="hidden sm:inline">Refreshing…</span>
                 </span>
               )}
             </nav>

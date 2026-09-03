@@ -1,4 +1,5 @@
 import { useState, useMemo } from "react";
+import { useHashSearchParam } from "@/hooks/use-hash-search";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useClient } from "@/lib/client-context";
 import { useLocation } from "wouter";
@@ -1154,14 +1155,21 @@ export default function GoogleBiddingPage() {
   const qc = useQueryClient();
 
   const [actionDialog, setActionDialog] = useState<ActionDialogState | null>(null);
-  const [filterRec, setFilterRec] = useState<string>("all");
+  // Survives a refresh instead of always resetting to "all".
+  const [filterRec, setFilterRec] = useHashSearchParam("rec", "all");
   const [sortBy, setSortBy] = useState<"alerts" | "confidence" | "conversions">("alerts");
   const [showHistory, setShowHistory] = useState(false);
   const [showRules, setShowRules] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
 
   const { data, isLoading, error, refetch } = useQuery<BiddingData>({
-    queryKey: ["/api/clients", activeClientId, "google/bidding-recommendations"],
+    // apiBase embeds BOTH clientId and platform ("/api/clients/<id>/<platform>").
+    // The key previously hardcoded the literal string "google/bidding-recommendations"
+    // regardless of activePlatform, so React Query treated every platform as the same
+    // cache entry: switching Meta -> Google on this page kept showing whichever
+    // platform's recommendations loaded first, with no refetch and no indication the
+    // table was now wrong for the selected platform.
+    queryKey: [apiBase, "bidding-recommendations"],
     queryFn: async () => {
       const res = await apiRequest(
         "GET",
@@ -1169,7 +1177,7 @@ export default function GoogleBiddingPage() {
       );
       return res.json();
     },
-    enabled: !!activeClientId,
+    enabled: !!activeClientId && activePlatform === "google",
     refetchInterval: 5 * 60 * 1000,
   });
 
@@ -1257,6 +1265,23 @@ export default function GoogleBiddingPage() {
   }, [data, filterRec, sortBy, searchQuery]);
 
   // ── Loading state ──
+  // Checked first: with `enabled` above now gated on activePlatform === "google",
+  // this query never fires for a Meta client/platform, so without this branch the
+  // page would fall straight into the "No Bidding Data Available" block below and
+  // read as a data problem rather than a wrong-platform page.
+  if (activePlatform !== "google") {
+    return (
+      <div className="p-6" data-testid="bidding-meta-notice">
+        <Card className="bg-card/40 border-border/50">
+          <CardContent className="p-8 text-center">
+            <Brain className="w-10 h-10 text-muted-foreground mx-auto mb-3" />
+            <p className="text-muted-foreground text-base">Bidding Intelligence is available for Google Ads only.</p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
   if (isLoading) {
     return (
       <div className="p-6 space-y-4 max-w-[1400px]">
@@ -1272,7 +1297,10 @@ export default function GoogleBiddingPage() {
     );
   }
 
-  // ── Error / no data state ──
+  // ── Error / no data state ── kept as one visual layout, but the copy and the
+  // retry button now depend on which case it actually is — a real fetch failure
+  // previously showed "Run the Google Ads agent", sending the user to fix the
+  // wrong thing.
   if (error || !data?.meta?.data_available) {
     return (
       <div className="p-6 space-y-4 max-w-[1400px]">
@@ -1290,11 +1318,20 @@ export default function GoogleBiddingPage() {
           <CardContent className="flex flex-col items-center justify-center py-20 text-center gap-3">
             <AlertTriangle className="w-12 h-12 text-muted-foreground" />
             <div>
-              <p className="text-base font-medium text-foreground">No Bidding Data Available</p>
+              <p className="text-base font-medium text-foreground">
+                {error ? "Couldn't Load Bidding Data" : "No Bidding Data Available"}
+              </p>
               <p className="text-xs text-muted-foreground mt-1">
-                Run the Google Ads agent to generate bidding analysis.
+                {error
+                  ? "The request to fetch bidding recommendations failed. This is likely a temporary server issue."
+                  : "Run the Google Ads agent to generate bidding analysis."}
               </p>
             </div>
+            {error && (
+              <Button variant="outline" size="sm" onClick={() => refetch()} className="mt-2">
+                Retry
+              </Button>
+            )}
           </CardContent>
         </Card>
       </div>

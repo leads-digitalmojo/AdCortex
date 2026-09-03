@@ -18,6 +18,7 @@ import {
   Play,
   Loader2,
   ShieldCheck,
+  AlertTriangle,
 } from "lucide-react";
 import { ExecutionButton } from "@/components/execution-button";
 import { useExecution } from "@/hooks/use-execution";
@@ -344,7 +345,7 @@ function renderAdCell(c: AdsPanelCreative, col: ColDef, thresholds: any): React.
 
 export default function AnalyticsAdsPage() {
   const clientContext = useClient();
-  const { analysisData: data, isLoadingAnalysis: isLoading, activePlatform } = clientContext ?? {};
+  const { analysisData: data, isLoadingAnalysis: isLoading, analysisError, activePlatform } = clientContext ?? {};
   const isGoogle = activePlatform === "google";
 
   const [sortKey, setSortKey] = useState<string>("spend");
@@ -432,11 +433,32 @@ export default function AnalyticsAdsPage() {
   };
 
   // ─── Loading state ───────────────────────────────────────────────
-  if (isLoading || !data) {
+  if (isLoading) {
     return (
-      <div className="p-6 space-y-4">
+      <div className="p-6 space-y-4" data-testid="analytics-ads-loading">
         <Skeleton className="h-8 w-48" />
         <Skeleton className="h-[400px] rounded-xl" />
+      </div>
+    );
+  }
+
+  // Previously merged with the loading branch above — a real fetch error left
+  // isLoading false and data undefined, which fell through to this same skeleton
+  // and spun forever with no message and no retry.
+  if (analysisError || !data) {
+    return (
+      <div className="p-6" data-testid="analytics-ads-error">
+        <Card className="bg-card/40 border-border/50">
+          <CardContent className="p-8 text-center flex flex-col items-center gap-3">
+            <AlertTriangle className="w-10 h-10 text-muted-foreground" />
+            <div>
+              <p className="text-base font-medium text-foreground">Couldn't Load Ads Data</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                {analysisError?.message || "The request to fetch analysis data failed. Try reloading the page."}
+              </p>
+            </div>
+          </CardContent>
+        </Card>
       </div>
     );
   }

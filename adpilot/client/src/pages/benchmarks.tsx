@@ -315,7 +315,7 @@ function formatMetricValue(value: number | undefined, format: "pct" | "inr" | "n
 // ─── Google Benchmarks Component ─────────────────────────────────────
 
 function GoogleBenchmarks() {
-  const { analysisData: data, isLoadingAnalysis, activeClientId, benchmarks, isLoadingBenchmarks } = useClient();
+  const { analysisData: data, isLoadingAnalysis, analysisError, activeClientId, benchmarks, isLoadingBenchmarks } = useClient();
   const { toast } = useToast();
   const [form, setForm] = useState<Record<string, any>>({});
   const [activeTab, setActiveTab] = useState<"targets" | "actuals" | "mtd">("targets");
@@ -415,6 +415,15 @@ function GoogleBenchmarks() {
 
   return (
     <div className="space-y-6 max-w-[1000px]">
+      {/* Editing targets doesn't depend on account data, so a fetch error here isn't
+          worth blocking the whole page over — but the "Actuals vs Targets" tab silently
+          shows blank actual columns on error with no explanation, so surface it inline. */}
+      {analysisError && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs text-amber-700 dark:text-amber-400">
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+          Couldn't load current account data — "Actuals vs Targets" may be incomplete. Targets can still be edited and saved normally.
+        </div>
+      )}
       {/* Tab toggle */}
       <div className="flex items-center gap-1 border-b border-border/50 pb-px">
         <button className={cn("px-4 py-2 text-xs font-medium transition-colors border-b-2", activeTab === "targets" ? "text-primary border-primary bg-primary/5" : "text-muted-foreground border-transparent hover:text-foreground")} onClick={() => setActiveTab("targets")}>

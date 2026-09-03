@@ -1,5 +1,6 @@
 import { useState, useMemo, useEffect, Fragment } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { useHashSearchParam } from "@/hooks/use-hash-search";
 import { useClient } from "@/lib/client-context";
 import { DataTablePagination } from "@/components/data-table-pagination";
 import type { AdsetAnalysis } from "@shared/schema";
@@ -69,7 +70,7 @@ function BenchmarkBadge({ value, benchmark, label }: { value: number; benchmark:
 }
 
 export default function AdsetsPage() {
-  const { analysisData: data, isLoadingAnalysis: isLoading, activePlatform, activeClient } = useClient();
+  const { analysisData: data, isLoadingAnalysis: isLoading, analysisError, activePlatform, activeClient } = useClient();
   const { executeBatch, isExecuting } = useExecution();
   const { isPaused: isEntityPaused } = usePausedEntities();
   const isGoogle = activePlatform === "google";
@@ -93,14 +94,17 @@ export default function AdsetsPage() {
   const [sortKey, setSortKey] = useState<SortKey>("health_score");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
 
-  const queryParams = new URLSearchParams(window.location.hash.split("?")[1] || "");
-  const initialFilter = queryParams.get("filter")?.toUpperCase() || "ALL";
-  const initialCampaignId = queryParams.get("campaignId") || "ALL";
-
   const [filterLayer, setFilterLayer] = useState<string>("ALL");
-  const [filterClassification, setFilterClassification] = useState<string>(initialFilter);
+  // Was window.location.hash parsed once into useState's initial value, plus a
+  // `useEffect` keyed on `[window.location.hash]` trying to catch later changes —
+  // that dependency doesn't actually make React watch a global, so it only worked
+  // by accident when something else happened to re-render the page. useHashSearchParam
+  // subscribes to hashchange directly and writes back on every filter change, so the
+  // URL and the filter state stay in sync both ways (deep link AND share/refresh).
+  const [rawFilterClassification, setFilterClassification] = useHashSearchParam("filter", "ALL");
+  const filterClassification = rawFilterClassification.toUpperCase();
+  const [filterCampaign, setFilterCampaign] = useHashSearchParam("campaignId", "ALL");
   const [filterLearning, setFilterLearning] = useState<string>("ALL");
-  const [filterCampaign, setFilterCampaign] = useState<string>(initialCampaignId);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const hasSelection = selectedIds.size > 0;
   const [bulkConfirm, setBulkConfirm] = useState<{ open: boolean; action: "pause" | "activate" }>({ open: false, action: "pause" });
@@ -122,14 +126,6 @@ export default function AdsetsPage() {
     if (metricKey === "freq") return n.toFixed(2);
     return formatNumber(n);
   };
-
-  useEffect(() => {
-    const q = new URLSearchParams(window.location.hash.split("?")[1] || "");
-    const f = q.get("filter")?.toUpperCase();
-    if (f && f !== filterClassification) setFilterClassification(f);
-    const cid = q.get("campaignId");
-    if (cid && cid !== filterCampaign) setFilterCampaign(cid);
-  }, [window.location.hash]);
 
   useEffect(() => { setPage(1); setSearchPage(1); setDgPage(1); }, [filterLayer, filterClassification, filterLearning, filterCampaign]);
 
@@ -232,11 +228,48 @@ export default function AdsetsPage() {
     setSelectedIds(new Set());
   }
 
-  if (isLoading || !data) {
+  if (isLoading) {
     return (
-      <div className="p-6">
-        <Skeleton className="h-8 w-48 mb-4" />
-        <Skeleton className="h-[500px] rounded-md" />
+      <div className="p-6 space-y-4" data-testid="adsets-loading">
+        {/* Shaped to roughly match the real header + filter-bar + table below. */}
+        <div className="flex items-center justify-between gap-4 flex-wrap">
+          <div className="space-y-2">
+            <Skeleton className="h-6 w-32" />
+            <Skeleton className="h-3.5 w-56" />
+          </div>
+          <div className="flex items-center gap-2">
+            <Skeleton className="h-7 w-24 rounded-md" />
+            <Skeleton className="h-7 w-24 rounded-md" />
+            <Skeleton className="h-7 w-24 rounded-md" />
+            <Skeleton className="h-7 w-24 rounded-md" />
+          </div>
+        </div>
+        <div className="rounded-md border border-border/50 overflow-hidden">
+          <Skeleton className="h-9 w-full rounded-none" />
+          {[...Array(8)].map((_, i) => (
+            <Skeleton key={i} className="h-11 w-full rounded-none border-t border-border/30" />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  // Previously a fetch error fell through to the same loading skeleton forever
+  // (isLoading false, data undefined) — no message, no retry.
+  if (analysisError || !data) {
+    return (
+      <div className="p-6" data-testid="adsets-error">
+        <Card className="bg-card/40 border-border/50">
+          <CardContent className="p-8 text-center flex flex-col items-center gap-3">
+            <AlertCircle className="w-10 h-10 text-muted-foreground" />
+            <div>
+              <p className="text-base font-medium text-foreground">Couldn't Load Ad Set Data</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                {analysisError?.message || "The request to fetch analysis data failed. Try reloading the page."}
+              </p>
+            </div>
+          </CardContent>
+        </Card>
       </div>
     );
   }

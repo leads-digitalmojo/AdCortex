@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
+import { useHashSearchParam } from "@/hooks/use-hash-search";
 import { useClient } from "@/lib/client-context";
 import { DataTablePagination } from "@/components/data-table-pagination";
 import { Card, CardContent } from "@/components/ui/card";
@@ -214,13 +215,14 @@ const ALL_CAMPAIGNS = "__all__";
 // ─── 4. COMPONENT ────────────────────────────────────────────────────
 
 export default function GoogleQualityScorePage() {
-  const { analysisData: rawData, isLoadingAnalysis: isLoading } = useClient();
+  const { analysisData: rawData, isLoadingAnalysis: isLoading, activePlatform } = useClient();
 
   // Normalized Data Access
   const data = useMemo(() => normalizeQualityScore(rawData), [rawData]);
 
   // Viewport State
-  const [selectedCampaign, setSelectedCampaign] = useState(ALL_CAMPAIGNS);
+  // Survives a refresh instead of always resetting to "all campaigns".
+  const [selectedCampaign, setSelectedCampaign] = useHashSearchParam("campaign", ALL_CAMPAIGNS);
   const [searchTerm, setSearchTerm] = useState("");
   const debouncedSearchTerm = useDebouncedValue(searchTerm, 200);
   const [sortKey, setSortKey] = useState<keyof QsKeyword>("quality_score");
@@ -283,6 +285,22 @@ export default function GoogleQualityScorePage() {
           {[1, 2, 3].map(i => <Skeleton key={i} className="h-24 rounded-md" />)}
         </div>
         <Skeleton className="h-[400px] rounded-md" />
+      </div>
+    );
+  }
+
+  // Without this, switching to a Meta client/platform while on this route silently
+  // ran Meta data through the Google normalizer, producing an empty keyword list
+  // that reads exactly like "no data" instead of "wrong platform".
+  if (activePlatform !== "google") {
+    return (
+      <div className="p-6" data-testid="quality-score-meta-notice">
+        <Card className="bg-card/40 border-border/50">
+          <CardContent className="p-8 text-center">
+            <Search className="w-10 h-10 text-muted-foreground mx-auto mb-3" />
+            <p className="text-muted-foreground text-base">Quality Score analysis is available for Google Ads only.</p>
+          </CardContent>
+        </Card>
       </div>
     );
   }

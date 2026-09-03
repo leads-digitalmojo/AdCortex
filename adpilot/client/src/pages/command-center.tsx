@@ -46,6 +46,8 @@ import {
 import { cn } from "@/lib/utils";
 import { timeAgo } from "@/lib/format";
 import { useToast } from "@/hooks/use-toast";
+import { useNow } from "@/hooks/use-now";
+import { formatHoursAgo, parseSyncTimestamp, hoursSince, gradeStaleness } from "@/lib/sync-state";
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -305,8 +307,12 @@ function CommandInput({ clientId, platform, apiBase }: { clientId: string; platf
 // ─── Page Component ───────────────────────────────────────────────
 
 export default function CommandCenterPage() {
-  const { activeClientId, activePlatform, analysisData: data, apiBase } = useClient();
+  const { activeClientId, activePlatform, analysisData: data, apiBase, syncState } = useClient();
   const { toast } = useToast();
+  const now = useNow();
+  const lastSuccessfulFetch = syncState?.last_successful_fetch || null;
+  const lastSuccessfulFetchDate = parseSyncTimestamp(lastSuccessfulFetch);
+  const dataStaleness = gradeStaleness(hoursSince(lastSuccessfulFetch, now));
 
   // Quick Actions state
   const [quickActionLoading, setQuickActionLoading] = useState<string | null>(null);
@@ -621,17 +627,46 @@ export default function CommandCenterPage() {
       </AlertDialog>
 
       {/* Page Header */}
-      <div className="flex items-center gap-3">
-        <div className="flex items-center justify-center w-9 h-9 rounded-lg bg-primary/15">
-          <Terminal className="w-5 h-5 text-primary" />
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-3">
+          <div className="flex items-center justify-center w-9 h-9 rounded-lg bg-primary/15">
+            <Terminal className="w-5 h-5 text-primary" />
+          </div>
+          <div>
+            <h1 className="t-page-title text-foreground">Command Center</h1>
+            <p className="text-xs text-muted-foreground">
+              Quick actions, manual task tracking, and agent notes
+            </p>
+          </div>
         </div>
-        <div>
-          <h1 className="t-page-title text-foreground">Command Center</h1>
-          <p className="text-xs text-muted-foreground">
-            Quick actions, manual task tracking, and agent notes
-          </p>
-        </div>
+        {/* This page's Quick Actions execute live pause/scale changes based on
+            `entitySource` above (adset/ad-group classification) — unlike the
+            Dashboard, it previously had NO freshness indicator at all. A marketer
+            could click "Pause Losers" acting on a classification computed from a
+            sync that failed or is a day old, with nothing on screen to suggest it. */}
+        {lastSuccessfulFetchDate && (
+          <Badge
+            variant={dataStaleness === "stale" ? "destructive" : dataStaleness === "aging" ? "warning" : "secondary"}
+            className={cn("w-fit shrink-0", dataStaleness === "fresh" && "text-muted-foreground")}
+            title={
+              dataStaleness !== "fresh"
+                ? "Quick Actions below act on this data. Consider syncing before executing if this is older than expected."
+                : undefined
+            }
+          >
+            Data as of: {lastSuccessfulFetchDate.toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })} ({formatHoursAgo(lastSuccessfulFetch, now)})
+          </Badge>
+        )}
       </div>
+      {syncState?.sync_status === "failed" && (
+        <div className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-red-500/10 border border-red-500/30">
+          <AlertTriangle className="w-4 h-4 text-red-500 shrink-0" />
+          <span className="text-xs text-red-700 dark:text-red-400 font-medium">
+            The most recent sync attempt failed — Quick Actions below would act on data from {formatHoursAgo(lastSuccessfulFetch, now) || "an earlier sync"}, not the latest account state.
+            {syncState?.error ? ` (${syncState.error})` : ""}
+          </span>
+        </div>
+      )}
 
       {/* Batch results banner */}
       {batchResults && (

@@ -1,4 +1,5 @@
 import { useState, useMemo } from "react";
+import { useHashSearchParam } from "@/hooks/use-hash-search";
 import { useClient } from "@/lib/client-context";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -53,10 +54,13 @@ interface KeywordEntry {
 }
 
 export default function KeywordsPage() {
-  const { analysisData: data, isLoadingAnalysis: isLoading } = useClient();
+  const { analysisData: data, isLoadingAnalysis: isLoading, analysisError, activePlatform } = useClient();
   const [searchTerm, setSearchTerm] = useState("");
   const debouncedSearchTerm = useDebouncedValue(searchTerm, 200);
-  const [selectedCampaign, setSelectedCampaign] = useState("all");
+  // Survives a refresh and is shareable as a link, rather than always resetting
+  // to "all campaigns" — this table can be large, and re-finding one campaign's
+  // filter after a reload was pure friction.
+  const [selectedCampaign, setSelectedCampaign] = useHashSearchParam("campaign", "all");
   const [sortKey, setSortKey] = useState<keyof KeywordEntry>("spend");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [page, setPage] = useState(1);
@@ -145,9 +149,28 @@ export default function KeywordsPage() {
     }
   }
 
+  // Reachable via the sidebar only when platform === "google" (see app-sidebar.tsx),
+  // but the page itself stays mounted if the user flips the Meta/Google toggle while
+  // already here. Without this guard, Meta data has no quality_score_analysis or
+  // keyword_breakdowns, so `keywords` above silently resolves to [] and the page
+  // rendered a fully-formed dashboard reading ₹0 / 0% everywhere — indistinguishable
+  // from "this account spent nothing on keywords".
+  if (activePlatform !== "google") {
+    return (
+      <div className="p-6" data-testid="keywords-meta-notice">
+        <Card className="bg-card/40 border-border/50">
+          <CardContent className="p-8 text-center">
+            <Search className="w-10 h-10 text-muted-foreground mx-auto mb-3" />
+            <p className="text-muted-foreground text-base">Keyword Intelligence is available for Google Ads only.</p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
   if (isLoading) {
     return (
-      <div className="p-6 space-y-4">
+      <div className="p-6 space-y-4" data-testid="keywords-loading">
         <Skeleton className="h-8 w-48" />
         <div className="grid grid-cols-4 gap-4">
           <Skeleton className="h-24 rounded-lg" />
@@ -155,7 +178,51 @@ export default function KeywordsPage() {
           <Skeleton className="h-24 rounded-lg" />
           <Skeleton className="h-24 rounded-lg" />
         </div>
-        <Skeleton className="h-[600px] rounded-lg" />
+        <div className="rounded-md border border-border/50 overflow-hidden">
+          <Skeleton className="h-9 w-full rounded-none" />
+          {[...Array(8)].map((_, i) => (
+            <Skeleton key={i} className="h-11 w-full rounded-none border-t border-border/30" />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  // This page previously had no error/empty guard at all — a failed fetch and a
+  // genuinely empty account rendered identically (all stat cards at ₹0/0%, empty
+  // table), and a real fetch error looked exactly like "no keyword spend".
+  if (analysisError || !data) {
+    return (
+      <div className="p-6" data-testid="keywords-error">
+        <Card className="bg-card/40 border-border/50">
+          <CardContent className="p-8 text-center flex flex-col items-center gap-3">
+            <AlertTriangle className="w-10 h-10 text-muted-foreground" />
+            <div>
+              <p className="text-base font-medium text-foreground">Couldn't Load Keyword Data</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                {analysisError?.message || "The request to fetch analysis data failed. Try reloading the page."}
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  if (keywords.length === 0) {
+    return (
+      <div className="p-6" data-testid="keywords-empty">
+        <Card className="bg-card/40 border-border/50">
+          <CardContent className="p-8 text-center flex flex-col items-center gap-3">
+            <Search className="w-10 h-10 text-muted-foreground" />
+            <div>
+              <p className="text-base font-medium text-foreground">No Keyword Data Yet</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                No keyword-level data has been collected for this client yet. This becomes available after the Google Ads agent's next run.
+              </p>
+            </div>
+          </CardContent>
+        </Card>
       </div>
     );
   }

@@ -3,63 +3,50 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { Field } from "@/components/add-client-modal";
+import type { ClientInfo } from "@/lib/client-context";
 import {
-  Plus, X, Loader2, CheckCircle, Facebook, Globe
+  Pencil, X, Loader2, Save, CheckCircle, Facebook, Globe
 } from "lucide-react";
 
-// --- Field helper ---
-export function Field({
-  label, value, onChange, placeholder, type = "text", helpText, required,
+export function EditClientModal({
+  client, onClose, onSaved,
 }: {
-  label: string; value: string; onChange: (v: string) => void;
-  placeholder?: string; type?: string; helpText?: string; required?: boolean;
+  client: ClientInfo; onClose: () => void; onSaved: () => void;
 }) {
-  return (
-    <div className="space-y-1">
-      <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground flex items-center gap-1">
-        {label}{required && <span className="text-red-400">*</span>}
-      </label>
-      <Input
-        type={type}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        className="text-base bg-muted/30 border-border/50"
-      />
-      {helpText && <p className="text-xs text-muted-foreground">{helpText}</p>}
-    </div>
-  );
-}
-
-export function AddClientModal({ onClose, onCreated }: { onClose: () => void; onCreated: (id: string) => void }) {
   const { toast } = useToast();
   const qc = useQueryClient();
-  const [name, setName] = useState("");
-  const [shortName, setShortName] = useState("");
-  const [project, setProject] = useState("");
-  const [location, setLocation] = useState("");
-  const [targetLocations, setTargetLocations] = useState("");
-  const [enableMeta, setEnableMeta] = useState(true);
-  const [enableGoogle, setEnableGoogle] = useState(true);
+  const [name, setName] = useState(client.name || "");
+  const [shortName, setShortName] = useState(client.shortName || "");
+  const [project, setProject] = useState(client.project || "");
+  const [location, setLocation] = useState(client.location || "");
+  const [targetLocations, setTargetLocations] = useState<string>(
+    (((client as any).targetLocations as string[]) || []).join(", ")
+  );
+  const [enableMeta, setEnableMeta] = useState(
+    client.platforms.find((p) => p.id === "meta")?.enabled ?? true
+  );
+  const [enableGoogle, setEnableGoogle] = useState(
+    client.platforms.find((p) => p.id === "google")?.enabled ?? true
+  );
 
   const mutation = useMutation({
     mutationFn: async () => {
-      const res = await apiRequest("POST", "/api/clients", {
+      const res = await apiRequest("PUT", `/api/clients/${client.id}`, {
         name, shortName, project, location,
         targetLocations: targetLocations.split(",").map((s) => s.trim()).filter(Boolean),
         enableMeta, enableGoogle,
       });
       if (!res.ok) {
         const err = await res.json();
-        throw new Error(err.error || "Failed to create client");
+        throw new Error(err.error || "Failed to update client");
       }
       return res.json();
     },
-    onSuccess: (data) => {
+    onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["/api/clients"] });
-      toast({ title: "Client created", description: `${name} added successfully` });
-      onCreated(data.id);
+      toast({ title: "Client updated", description: `${name} was saved` });
+      onSaved();
     },
     onError: (err: Error) => {
       toast({ title: "Error", description: err.message, variant: "destructive" });
@@ -71,7 +58,7 @@ export function AddClientModal({ onClose, onCreated }: { onClose: () => void; on
       <div className="w-full max-w-lg mx-4 bg-background border border-border rounded-xl shadow-2xl">
         <div className="flex items-center justify-between px-5 py-4 border-b border-border">
           <h2 className="text-base font-semibold flex items-center gap-2">
-            <Plus className="w-4 h-4 text-primary" /> Add New Client
+            <Pencil className="w-4 h-4 text-primary" /> Edit Client
           </h2>
           <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
             <X className="w-4 h-4" />
@@ -115,16 +102,12 @@ export function AddClientModal({ onClose, onCreated }: { onClose: () => void; on
               ))}
             </div>
           </div>
-
-          <p className="text-xs text-muted-foreground pt-1">
-            After creating the client, add API credentials from the Manage Clients registry (Admins only).
-          </p>
         </div>
         <div className="flex justify-end gap-2 px-5 py-4 border-t border-border">
           <Button variant="outline" size="sm" onClick={onClose}>Cancel</Button>
           <Button size="sm" onClick={() => mutation.mutate()} disabled={!name.trim() || mutation.isPending} className="gap-1">
-            {mutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
-            Create Client
+            {mutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+            Save Changes
           </Button>
         </div>
       </div>

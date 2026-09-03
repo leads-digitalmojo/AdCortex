@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useHashSearchParam } from "@/hooks/use-hash-search";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -180,7 +181,7 @@ export default function BreakdownsPage() {
   const platformKey = activePlatform === "google" ? "google" : "meta";
   const apiBase = `/api/clients/${clientId}`;
 
-  const { data: analysisData, isLoading: isLoadingAnalysis } = useQuery({
+  const { data: analysisData, isLoading: isLoadingAnalysis, error: analysisError } = useQuery({
     queryKey: [apiBase, platformKey, "analysis", globalCadence],
     queryFn: async () => {
       const url = `${apiBase}/${platformKey}/analysis?cadence=${globalCadence}`;
@@ -198,6 +199,7 @@ export default function BreakdownsPage() {
           clientId={clientId}
           analysisData={analysisData}
           isLoadingAnalysis={isLoadingAnalysis}
+          analysisError={analysisError}
           activeCadence={activeCadence}
         />
       ) : (
@@ -205,6 +207,7 @@ export default function BreakdownsPage() {
           clientId={clientId}
           analysisData={analysisData}
           isLoadingAnalysis={isLoadingAnalysis}
+          analysisError={analysisError}
           activeCadence={activeCadence}
         />
       )}
@@ -214,10 +217,15 @@ export default function BreakdownsPage() {
 
 // ─── Meta Breakdowns ───────────────────────────────────────────────
 
-function MetaBreakdowns({ clientId, analysisData, isLoadingAnalysis, activeCadence }: any) {
+function MetaBreakdowns({ clientId, analysisData, isLoadingAnalysis, analysisError, activeCadence }: any) {
   const apiBase = `/api/clients/${clientId}/meta`;
-  const [activeTab, setActiveTab] = useState<MetaTabType>("Age");
-  const [selectedCampaign, setSelectedCampaign] = useState(ACCOUNT_OVERVIEW);
+  // Survive a refresh instead of always resetting to Age / account overview. The
+  // URL is untrusted input, so validate `tab` against META_TABS before trusting it.
+  const [rawActiveTab, setActiveTab] = useHashSearchParam("tab", "Age");
+  const activeTab: MetaTabType = (META_TABS as readonly string[]).includes(rawActiveTab)
+    ? (rawActiveTab as MetaTabType)
+    : "Age";
+  const [selectedCampaign, setSelectedCampaign] = useHashSearchParam("campaign", ACCOUNT_OVERVIEW);
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const [sortKey, setSortKey] = useState<string>("spend");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
@@ -247,7 +255,7 @@ function MetaBreakdowns({ clientId, analysisData, isLoadingAnalysis, activeCaden
       .sort((a: any, b: any) => b.spend - a.spend);
   }, [analysisData]);
 
-  const { data, isLoading } = useQuery<BreakdownData>({
+  const { data, isLoading, error: breakdownsError } = useQuery<BreakdownData>({
     queryKey: [apiBase, "breakdowns", selectedCampaign, activeCadence],
     queryFn: async () => {
       const url = selectedCampaign === ACCOUNT_OVERVIEW
@@ -308,6 +316,15 @@ function MetaBreakdowns({ clientId, analysisData, isLoadingAnalysis, activeCaden
 
   return (
     <div className="p-6 space-y-6 max-w-[1600px]">
+      {/* rawRows above degrades to [] on a fetch error (`data?.available && ...`),
+          so a real error previously rendered an empty breakdown table with no
+          explanation — identical to "no breakdown data for this segment". */}
+      {(analysisError || breakdownsError) && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs text-amber-700 dark:text-amber-400">
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+          Couldn't load breakdown data — the table below may be empty or incomplete because of a fetch error, not because this segment has no data.
+        </div>
+      )}
       <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center border border-primary/20">
@@ -446,10 +463,13 @@ function MetaBreakdowns({ clientId, analysisData, isLoadingAnalysis, activeCaden
 
 // ─── Google Breakdowns ─────────────────────────────────────────────
 
-function GoogleBreakdowns({ clientId, analysisData, isLoadingAnalysis, activeCadence }: any) {
+function GoogleBreakdowns({ clientId, analysisData, isLoadingAnalysis, analysisError, activeCadence }: any) {
   const apiBase = `/api/clients/${clientId}/google`;
-  const [activeTab, setActiveTab] = useState<GoogleTabType>("Age");
-  const [selectedCampaign, setSelectedCampaign] = useState(ACCOUNT_OVERVIEW);
+  const [rawActiveTab, setActiveTab] = useHashSearchParam("tab", "Age");
+  const activeTab: GoogleTabType = (GOOGLE_TABS as readonly string[]).includes(rawActiveTab)
+    ? (rawActiveTab as GoogleTabType)
+    : "Age";
+  const [selectedCampaign, setSelectedCampaign] = useHashSearchParam("campaign", ACCOUNT_OVERVIEW);
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const [columnSize, setColumnSize] = useState<"compact" | "normal" | "wide">("normal");
   const [sortKey, setSortKey] = useState<string>("cost");
@@ -462,7 +482,7 @@ function GoogleBreakdowns({ clientId, analysisData, isLoadingAnalysis, activeCad
 
   function toggleExpand(id: string) { setExpandedIds(prev => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; }); }
 
-  const { data, isLoading } = useQuery<BreakdownData>({
+  const { data, isLoading, error: breakdownsError } = useQuery<BreakdownData>({
     queryKey: [apiBase, "breakdowns", selectedCampaign, activeCadence],
     queryFn: async () => {
       const url = selectedCampaign === ACCOUNT_OVERVIEW
@@ -544,12 +564,21 @@ function GoogleBreakdowns({ clientId, analysisData, isLoadingAnalysis, activeCad
   if (isLoading) return <div className="p-12 text-center text-muted-foreground"><Clock className="w-8 h-8 mx-auto mb-2 animate-spin opacity-20" /><p>Scanning Google demographics...</p></div>;
 
   if (!data?.available) {
+    // "not yet synced" and "the fetch failed" previously used identical copy — a
+    // real error read as a normal, temporary pre-sync state.
+    const isError = !!(analysisError || breakdownsError);
     return (
       <Card className="m-6 bg-muted/20 border-border/50">
         <CardContent className="p-12 text-center">
-          <Clock className="w-10 h-10 mx-auto text-muted-foreground mb-3" />
+          {isError ? (
+            <AlertTriangle className="w-10 h-10 mx-auto text-muted-foreground mb-3" />
+          ) : (
+            <Clock className="w-10 h-10 mx-auto text-muted-foreground mb-3" />
+          )}
           <p className="text-base text-muted-foreground">
-            {data?.message || "Google breakdown data not yet synced for this cadence."}
+            {isError
+              ? "Couldn't load Google breakdown data — the request failed. Try reloading the page."
+              : data?.message || "Google breakdown data not yet synced for this cadence."}
           </p>
         </CardContent>
       </Card>

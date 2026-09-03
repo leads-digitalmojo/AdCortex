@@ -931,7 +931,13 @@ function LearningInsightsTab({ platformFilter }: { platformFilter: PlatformTab }
                         </div>
                         <div>
                           <span className="text-muted-foreground">CTR</span>
-                          <p className="font-medium tabular-nums">{entry.beforeMetrics.ctr?.toFixed(2)}%</p>
+                          {/* Was `{ctr?.toFixed(2)}%` — a missing ctr rendered the raw
+                              string "undefined%" instead of the "—" this table uses
+                              for CPL just above. 0 is a real CTR, not missing data,
+                              so only a non-number falls back. */}
+                          <p className="font-medium tabular-nums">
+                            {typeof entry.beforeMetrics.ctr === "number" ? `${entry.beforeMetrics.ctr.toFixed(2)}%` : "—"}
+                          </p>
                         </div>
                       </div>
                     </div>
@@ -969,7 +975,9 @@ function LearningInsightsTab({ platformFilter }: { platformFilter: PlatformTab }
                           </div>
                           <div>
                             <span className="text-muted-foreground">CTR</span>
-                            <p className="font-medium tabular-nums">{entry.afterMetrics.ctr?.toFixed(2)}%</p>
+                            <p className="font-medium tabular-nums">
+                              {typeof entry.afterMetrics.ctr === "number" ? `${entry.afterMetrics.ctr.toFixed(2)}%` : "—"}
+                            </p>
                           </div>
                         </div>
                       ) : (

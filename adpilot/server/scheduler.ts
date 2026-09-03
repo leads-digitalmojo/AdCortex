@@ -37,6 +37,10 @@ export interface PlatformSyncState {
   last_synced_at: string | null;
   last_successful_fetch: string | null;
   sync_status: PlatformSyncStatus;
+  // Populated on a failed run, cleared on the next loading/success transition.
+  // The dashboard's failure banners read this to show what actually went wrong
+  // instead of a generic "run the agent" message.
+  error?: string | null;
 }
 
 type PlatformSyncStore = Record<string, Record<string, PlatformSyncState>>;
@@ -403,6 +407,7 @@ async function syncClientPlatform(
   setPlatformSyncState(client.id, platform, {
     last_synced_at: new Date().toISOString(),
     sync_status: "loading",
+    error: null,
   });
 
   try {
@@ -416,6 +421,7 @@ async function syncClientPlatform(
       last_synced_at: new Date().toISOString(),
       last_successful_fetch: getLatestAnalysisTimestamp(client.id, platform),
       sync_status: "success",
+      error: null,
     });
 
     // PERSIST TO DB: capture every cadence file the agent wrote and push to Postgres
@@ -444,6 +450,10 @@ async function syncClientPlatform(
     setPlatformSyncState(client.id, platform, {
       last_synced_at: new Date().toISOString(),
       sync_status: "failed",
+      // Was previously never persisted — the client's failure banners have a
+      // `syncState.error` field to display, but it always rendered nothing
+      // because this catch block only logged the message and dropped it.
+      error: error?.message || String(error) || "Unknown error",
     });
     log(`Scheduler: ${label} agent failed for client '${client.id}': ${error.message}`, "scheduler");
   } finally {

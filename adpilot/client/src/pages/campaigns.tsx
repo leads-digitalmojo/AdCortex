@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect, Fragment } from "react";
+import { useHashSearchParam } from "@/hooks/use-hash-search";
 import { useClient } from "@/lib/client-context";
 import { DataTablePagination } from "@/components/data-table-pagination";
 import type { CampaignAudit } from "@shared/schema";
@@ -109,6 +110,7 @@ export default function CampaignsPage() {
   const {
     analysisData: data,
     isLoadingAnalysis: isLoading,
+    analysisError,
     activePlatform,
     activeClient,
     benchmarks
@@ -120,7 +122,14 @@ export default function CampaignsPage() {
 
   const [sortKey, setSortKey] = useState<SortKey>("health_score");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
-  const [filterLayer, setFilterLayer] = useState<string>("ALL");
+  // Dashboard's "Campaign Split" badges link here as /campaigns?filter=branded and
+  // ?filter=demand_gen (dashboard.tsx), promising a filtered view; also lets a filtered
+  // view survive a refresh or be shared as a link. filterLayer's own matching logic
+  // already lowercases and does a substring match against layer/campaign_type, so the
+  // raw param value works as-is. Uses useHashSearchParam, NOT wouter's useSearch() —
+  // this app's hash router puts the query string inside the `#` fragment, which
+  // wouter's default useSearch() never looks at (see hooks/use-hash-search.ts).
+  const [filterLayer, setFilterLayer] = useHashSearchParam("filter", "ALL");
   const [filterStatus, setFilterStatus] = useState<string>("ALL");
   const [filterClassification, setFilterClassification] = useState<string>("ALL");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -287,11 +296,50 @@ export default function CampaignsPage() {
     return dynamicThresholds || data?.dynamic_thresholds;
   }, [dynamicThresholds, data?.dynamic_thresholds]);
 
-  if (isLoading || !data) {
+  if (isLoading) {
     return (
-      <div className="p-6">
-        <Skeleton className="h-8 w-48 mb-4" />
-        <Skeleton className="h-[500px] rounded-md" />
+      <div className="p-6 space-y-4" data-testid="campaigns-loading">
+        {/* Shaped to roughly match the real header + filter-bar + table below,
+            instead of one undifferentiated block — a flat rectangle popping into a
+            full table is a bigger, more jarring layout shift than this. */}
+        <div className="flex items-center justify-between gap-4 flex-wrap">
+          <div className="space-y-2">
+            <Skeleton className="h-6 w-32" />
+            <Skeleton className="h-3.5 w-56" />
+          </div>
+          <div className="flex items-center gap-2">
+            <Skeleton className="h-7 w-24 rounded-md" />
+            <Skeleton className="h-7 w-24 rounded-md" />
+            <Skeleton className="h-7 w-24 rounded-md" />
+          </div>
+        </div>
+        <div className="rounded-md border border-border/50 overflow-hidden">
+          <Skeleton className="h-9 w-full rounded-none" />
+          {[...Array(8)].map((_, i) => (
+            <Skeleton key={i} className="h-11 w-full rounded-none border-t border-border/30" />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  // Previously this fell through to the same loading skeleton forever on a real
+  // fetch error (isLoading becomes false, data stays undefined) — no message, no
+  // retry, indistinguishable from a slow network to the user.
+  if (analysisError || !data) {
+    return (
+      <div className="p-6" data-testid="campaigns-error">
+        <Card className="bg-card/40 border-border/50">
+          <CardContent className="p-8 text-center flex flex-col items-center gap-3">
+            <AlertCircle className="w-10 h-10 text-muted-foreground" />
+            <div>
+              <p className="text-base font-medium text-foreground">Couldn't Load Campaign Data</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                {analysisError?.message || "The request to fetch analysis data failed. Try reloading the page."}
+              </p>
+            </div>
+          </CardContent>
+        </Card>
       </div>
     );
   }

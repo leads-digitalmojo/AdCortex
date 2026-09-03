@@ -164,6 +164,15 @@ interface ClientContextValue {
   // Data
   analysisData: AnalysisData | undefined;
   isLoadingAnalysis: boolean;
+  // True during the initial fetch AND any background refetch (cadence switch, client
+  // switch, benchmark change). Use this — not isLoadingAnalysis — to show a refresh
+  // indicator, since placeholderData keeps isLoadingAnalysis false while stale data
+  // from the previous selection is still on screen.
+  isFetchingAnalysis: boolean;
+  // True while analysisData is still the PREVIOUS cadence/client's data, held over by
+  // placeholderData during a refetch. Distinguishes "no data at all" from "stale data,
+  // fresh data incoming".
+  isAnalysisPlaceholder: boolean;
   analysisError: Error | null;
   // MTD-fixed analysis — always cadence=monthly, never changes on cadence switch
   // Use this for Account Health and Health Score Breakdown
@@ -259,6 +268,8 @@ export function ClientProvider({ children }: { children: ReactNode }) {
   const {
     data: rawAnalysisData,
     isLoading: isLoadingAnalysis,
+    isFetching: isFetchingAnalysis,
+    isPlaceholderData: isAnalysisPlaceholder,
     error: analysisError,
   } = useQuery<AnalysisData>({
     queryKey: [apiBase, "analysis", activeCadence, benchmarksSig],
@@ -269,6 +280,10 @@ export function ClientProvider({ children }: { children: ReactNode }) {
     enabled: !!activePlatformInfo?.enabled && !!activePlatformInfo?.hasData,
     // CRITICAL: staleTime must be 0 so data updates immediately when benchmarks change
     staleTime: 0,
+    // placeholderData keeps the previous cadence/client's numbers on screen during a
+    // refetch (avoids a full-page flash), but that means isLoading stays false while
+    // stale data is shown — isFetching/isPlaceholderData above are what callers must
+    // check if they want to indicate "this is being refreshed" (see App.tsx header).
     placeholderData: (previousData: any) => previousData,
     retry: false,
   });
@@ -370,6 +385,8 @@ export function ClientProvider({ children }: { children: ReactNode }) {
         setActiveCadence,
         analysisData,
         isLoadingAnalysis,
+        isFetchingAnalysis,
+        isAnalysisPlaceholder,
         analysisError: analysisError as Error | null,
         mtdAnalysisData,
         syncState,

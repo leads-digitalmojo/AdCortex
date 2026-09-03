@@ -313,7 +313,7 @@ function DgCampaignRow({ camp, targetCpl }: { camp: DgCampaign; targetCpl: numbe
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function GoogleAudiencesPage() {
-  const { analysisData: data, isLoadingAnalysis: isLoading, activeClient } = useClient();
+  const { analysisData: data, isLoadingAnalysis: isLoading, activeClient, activePlatform } = useClient();
 
   const dgCampaigns = useMemo((): DgCampaign[] => {
     if (!data) return [];
@@ -366,6 +366,22 @@ export default function GoogleAudiencesPage() {
           {[...Array(4)].map((_, i) => <Skeleton key={i} className="h-20 rounded-lg" />)}
         </div>
         <Skeleton className="h-[400px] rounded-lg" />
+      </div>
+    );
+  }
+
+  // Checked before the "no data" branch below: without this, switching to a
+  // Meta client/platform on this route reads as "no Demand Gen campaigns" — an
+  // empty-account message — instead of "wrong platform for this page".
+  if (activePlatform !== "google") {
+    return (
+      <div className="p-6" data-testid="google-audiences-meta-notice">
+        <Card className="bg-card/40 border-border/50">
+          <CardContent className="p-8 text-center">
+            <Users className="w-10 h-10 text-muted-foreground mx-auto mb-3" />
+            <p className="text-muted-foreground text-base">Demand Gen audience analysis is available for Google Ads only.</p>
+          </CardContent>
+        </Card>
       </div>
     );
   }

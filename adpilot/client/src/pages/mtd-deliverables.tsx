@@ -23,6 +23,7 @@ import {
   Zap,
   Activity,
   ArrowUpRight,
+  PenLine,
   TrendingDown,
   Info,
   LayoutDashboard,
@@ -169,7 +170,7 @@ export default function MtdDeliverablesPage() {
   const [hasChanges, setHasChanges] = useState(false);
 
   // 1. Fetch Consolidated MTD Data (Source of Truth)
-  const { data: mtdData, isLoading: isLoadingMtd } = useQuery<ConsolidatedMtdData>({
+  const { data: mtdData, isLoading: isLoadingMtd, error: mtdError } = useQuery<ConsolidatedMtdData>({
     queryKey: ["/api/mtd-deliverables", activeClientId, activePlatform],
     queryFn: async () => {
       const res = await apiRequest("GET", `/api/mtd-deliverables?client_id=${activeClientId}&platform=${activePlatform}`);
@@ -377,6 +378,19 @@ export default function MtdDeliverablesPage() {
 
   return (
     <div className="p-6 space-y-6 max-w-[1400px]">
+      {/* The consolidated MTD query failing left every field on this page reading
+          "Updated: Never" / blank / 0 with no explanation — indistinguishable from
+          a brand-new client that simply hasn't had any data entered yet. The manual
+          entry form below still works even when this query fails (it's a separate
+          query), so this is a banner, not a full-page block. */}
+      {mtdError && (
+        <div className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-red-500/10 border border-red-500/30">
+          <AlertTriangle className="w-4 h-4 text-red-500 shrink-0" />
+          <span className="text-xs text-red-700 dark:text-red-400 font-medium">
+            Couldn't load consolidated MTD data — the figures below may be blank or stale, not necessarily zero. Manual entry still works normally.
+          </span>
+        </div>
+      )}
       {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-4">
         <div className="flex items-center gap-3">
@@ -409,7 +423,14 @@ export default function MtdDeliverablesPage() {
                   <div className="flex items-center justify-between mb-4">
                     <TooltipProvider>
                       <Tooltip>
+                        {/* kpi.source/type ("Manual" vs "API"/"Agent") previously only
+                            surfaced inside this tooltip on hover — a marketer scanning
+                            the tile grid had no persistent way to tell a typed-in number
+                            from a platform-reported one without hovering each label. */}
                         <TooltipTrigger className="text-xs font-bold uppercase tracking-widest text-muted-foreground flex items-center gap-1 hover:text-foreground transition-colors overflow-hidden truncate max-w-[120px]">
+                          {kpi.type === "MANUAL" && (
+                            <PenLine className="w-3 h-3 text-amber-400 shrink-0" aria-label="Manually entered" />
+                          )}
                           {kpi.label}
                         </TooltipTrigger>
                         <TooltipContent className="max-w-[200px] p-3 space-y-2 bg-card border-border shadow-2xl">

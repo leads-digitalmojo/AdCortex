@@ -76,6 +76,7 @@ function Field({
 }
 
 import { AddClientModal } from "@/components/add-client-modal";
+import { EditClientModal } from "@/components/edit-client-modal";
 import { ImportMccModal } from "@/components/import-mcc-modal";
 
 // ─── Credentials Panel ───────────────────────────────────────────────
@@ -290,8 +291,11 @@ function ClientRow({ client, isDefault }: { client: ClientInfo; isDefault: boole
   const [, setLocation] = useLocation();
   const [expanded, setExpanded] = useState(false);
   const [showCreds, setShowCreds] = useState(false);
+  const [showEdit, setShowEdit] = useState(false);
   const [credsFocus, setCredsFocus] = useState<PlatformKey | null>(null);
   const [deleting, setDeleting] = useState(false);
+
+  const canEditDetails = isAdmin || client.createdBy === user?.id;
 
   // The server allows credential writes for anyone with access to the client
   // (admin, assignee, or creator — see enforceOwnership in server/auth.ts), and
@@ -358,6 +362,15 @@ function ClientRow({ client, isDefault }: { client: ClientInfo; isDefault: boole
             </div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
+            {canEditDetails && (
+              <Button
+                size="sm" variant="outline" className="h-7 text-xs gap-1"
+                onClick={(e) => { e.stopPropagation(); setShowEdit(true); }}
+                data-testid="button-edit-client"
+              >
+                <Edit2 className="w-3 h-3" /> Edit
+              </Button>
+            )}
             {canManageCredentials && (
               <Button
                 size="sm" variant="outline" className="h-7 text-xs gap-1"
@@ -467,6 +480,14 @@ function ClientRow({ client, isDefault }: { client: ClientInfo; isDefault: boole
           clientId={client.id}
           focusPlatform={credsFocus}
           onClose={() => { setShowCreds(false); setCredsFocus(null); }}
+        />
+      )}
+
+      {showEdit && (
+        <EditClientModal
+          client={client}
+          onClose={() => setShowEdit(false)}
+          onSaved={() => setShowEdit(false)}
         />
       )}
     </>

@@ -1,4 +1,5 @@
 import { useState, useMemo } from "react";
+import { useHashSearchParam } from "@/hooks/use-hash-search";
 import { useClient } from "@/lib/client-context";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -69,11 +70,12 @@ function cplColor(cpl: number, target: number): string {
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function AudiencesPage() {
-  const { analysisData: data, isLoadingAnalysis: isLoading, activePlatform } = useClient();
+  const { analysisData: data, isLoadingAnalysis: isLoading, analysisError, activePlatform } = useClient();
   const [searchTerm, setSearchTerm] = useState("");
   const [sortKey, setSortKey] = useState<keyof AudienceRow>("spend");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
-  const [filterLayer, setFilterLayer] = useState<string>("all");
+  // Survives a refresh instead of always resetting to "all".
+  const [filterLayer, setFilterLayer] = useHashSearchParam("layer", "all");
 
   // ── Extract audience rows from actual data ──────────────────────────────────
   const audiences = useMemo((): AudienceRow[] => {
@@ -177,13 +179,13 @@ export default function AudiencesPage() {
   }
 
   if (!data || audiences.length === 0) {
+    // A real fetch error and a genuinely empty account previously showed the exact
+    // same "run the agent" message — factually wrong on error, and it sends the
+    // user chasing the wrong fix (an agent run won't resolve a server error).
+    const isError = !!analysisError;
     return (
-      <div className="p-6 space-y-5 max-w-[1400px]">
+      <div className="p-6 space-y-5 max-w-[1400px]" data-testid={isError ? "audiences-error" : "audiences-empty"}>
         <div>
-          <h1 className="text-xl font-bold text-foreground flex items-center gap-2">
-            <Users className="w-5 h-5 text-primary" />
-            Audience Intelligence
-          </h1>
           <h1 className="t-page-title flex items-center gap-2">
             <Users className="w-5 h-5 text-primary" />
             Audience Intelligence
@@ -194,9 +196,13 @@ export default function AudiencesPage() {
           <CardContent className="flex flex-col items-center justify-center py-16 text-center gap-3">
             <AlertTriangle className="w-10 h-10 text-muted-foreground" />
             <div>
-              <p className="t-body font-medium text-foreground">No audience data available</p>
+              <p className="t-body font-medium text-foreground">
+                {isError ? "Couldn't Load Audience Data" : "No audience data available"}
+              </p>
               <p className="text-xs text-muted-foreground mt-1">
-                Run the {activePlatform === "google" ? "Google Ads" : "Meta Ads"} agent to populate audience data.
+                {isError
+                  ? analysisError?.message || "The request to fetch analysis data failed. Try reloading the page."
+                  : `Run the ${activePlatform === "google" ? "Google Ads" : "Meta Ads"} agent to populate audience data.`}
               </p>
             </div>
           </CardContent>
