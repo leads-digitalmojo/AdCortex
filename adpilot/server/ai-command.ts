@@ -394,10 +394,10 @@ async function executeActionPlan(
           requestedBy: "agent",
         };
 
-        const previousMetaAccessToken = process.env.META_ACCESS_TOKEN;
-        const previousMetaAdAccountId = process.env.META_AD_ACCOUNT_ID;
-
-        // Scalable Env Fallback Logic
+        // Per-client scoped fallback for the one client whose Meta creds still live in
+        // .env rather than the DB (META_REVASA_AURA_* — see scheduler.ts's identical
+        // scoped-env-var pattern). Not a shared default: this only ever applies to
+        // this one clientId.
         const CLIENT_META_CONFIG: Record<string, { accessToken: string; adAccountId: string } | null> = {
           "revasa-aura": {
             accessToken: process.env.META_REVASA_AURA_ACCESS_TOKEN || "",
@@ -405,52 +405,48 @@ async function executeActionPlan(
           }
         };
 
-        try {
-          if (credentials.meta?.accessToken) {
-            process.env.META_ACCESS_TOKEN = credentials.meta.accessToken;
-            process.env.META_AD_ACCOUNT_ID = credentials.meta.adAccountId;
-          } else if (CLIENT_META_CONFIG[clientId] && CLIENT_META_CONFIG[clientId]?.accessToken) {
-            process.env.META_ACCESS_TOKEN = CLIENT_META_CONFIG[clientId]!.accessToken;
-            process.env.META_AD_ACCOUNT_ID = CLIENT_META_CONFIG[clientId]!.adAccountId;
+        // Pass credentials on the request itself rather than through process.env —
+        // executeAction() no longer reads a shared env fallback (that was how an
+        // action for one client could silently execute against a different client's
+        // real Meta account), so this must be the only path that supplies them.
+        if (credentials.meta?.accessToken) {
+          req.accessToken = credentials.meta.accessToken;
+          req.adAccountId = credentials.meta.adAccountId;
+        } else if (CLIENT_META_CONFIG[clientId]?.accessToken) {
+          req.accessToken = CLIENT_META_CONFIG[clientId]!.accessToken;
+          req.adAccountId = CLIENT_META_CONFIG[clientId]!.adAccountId;
+        }
+
+        const result = await executeAction(req);
+        outcomes.push({
+          campaignId,
+          campaignName,
+          action: metaAction,
+          success: result.success,
+          message: result.error || (result.success ? "Action completed" : "Action failed"),
+          previousValue: result.previousValue,
+          newValue: result.newValue,
+        });
+
+        // ─── Learning Engine Integration ──────────────────────────
+        if (result.success) {
+          try {
+            recordExecution(
+              `meta-${campaignId}-${Date.now()}`,
+              clientId,
+              "meta",
+              campaignId,
+              campaignName,
+              "campaign",
+              metaAction,
+              action.parameters?.reason || actionPlan.strategic_rationale,
+              analysisData,
+              actionPlan.strategic_rationale,
+              "AI Agent"
+            );
+          } catch (err: any) {
+            console.warn(`[AI Command] Learning record failed: ${err.message}`);
           }
-
-          const result = await executeAction(req);
-          outcomes.push({
-            campaignId,
-            campaignName,
-            action: metaAction,
-            success: result.success,
-            message: result.error || (result.success ? "Action completed" : "Action failed"),
-            previousValue: result.previousValue,
-            newValue: result.newValue,
-          });
-
-          // ─── Learning Engine Integration ──────────────────────────
-          if (result.success) {
-            try {
-              recordExecution(
-                `meta-${campaignId}-${Date.now()}`,
-                clientId,
-                "meta",
-                campaignId,
-                campaignName,
-                "campaign",
-                metaAction,
-                action.parameters?.reason || actionPlan.strategic_rationale,
-                analysisData,
-                actionPlan.strategic_rationale,
-                "AI Agent"
-              );
-            } catch (err: any) {
-              console.warn(`[AI Command] Learning record failed: ${err.message}`);
-            }
-          }
-        } finally {
-          if (previousMetaAccessToken === undefined) delete process.env.META_ACCESS_TOKEN;
-          else process.env.META_ACCESS_TOKEN = previousMetaAccessToken;
-
-          if (previousMetaAdAccountId === undefined) delete process.env.META_AD_ACCOUNT_ID;
-          else process.env.META_AD_ACCOUNT_ID = previousMetaAdAccountId;
         }
 
       } else if (executionPlatform === "google") {
@@ -477,60 +473,49 @@ async function executeActionPlan(
           requestedBy: "agent",
         };
 
-        const previousGoogleEnv = {
-          GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
-          GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
-          GOOGLE_REFRESH_TOKEN: process.env.GOOGLE_REFRESH_TOKEN,
-          GOOGLE_DEVELOPER_TOKEN: process.env.GOOGLE_DEVELOPER_TOKEN,
-          GOOGLE_MCC_ID: process.env.GOOGLE_MCC_ID,
-          GOOGLE_CUSTOMER_ID: process.env.GOOGLE_CUSTOMER_ID,
-        };
+        // Pass credentials on the request itself — see the matching change in the
+        // Meta branch above. executeGoogleAction() requires req.customerId/credentials
+        // explicitly and no longer falls back to process.env, so this must supply them.
+        if (credentials.google?.clientId) {
+          req.customerId = String(credentials.google.customerId ?? "").replace(/\D/g, "");
+          req.credentials = {
+            clientId: credentials.google.clientId,
+            clientSecret: credentials.google.clientSecret,
+            refreshToken: credentials.google.refreshToken,
+            developerToken: credentials.google.developerToken,
+            mccId: credentials.google.mccId,
+          };
+        }
 
-        try {
-          if (credentials.google?.clientId) {
-            process.env.GOOGLE_CLIENT_ID = credentials.google.clientId;
-            process.env.GOOGLE_CLIENT_SECRET = credentials.google.clientSecret;
-            process.env.GOOGLE_REFRESH_TOKEN = credentials.google.refreshToken;
-            process.env.GOOGLE_DEVELOPER_TOKEN = credentials.google.developerToken;
-            process.env.GOOGLE_MCC_ID = credentials.google.mccId;
-            process.env.GOOGLE_CUSTOMER_ID = credentials.google.customerId;
-          }
+        const result = await executeGoogleAction(req);
+        outcomes.push({
+          campaignId,
+          campaignName,
+          action: googleAction,
+          success: result.success,
+          message: result.error || (result.success ? "Action completed" : "Action failed"),
+          previousValue: result.previousValue,
+          newValue: result.newValue,
+        });
 
-          const result = await executeGoogleAction(req);
-          outcomes.push({
-            campaignId,
-            campaignName,
-            action: googleAction,
-            success: result.success,
-            message: result.error || (result.success ? "Action completed" : "Action failed"),
-            previousValue: result.previousValue,
-            newValue: result.newValue,
-          });
-
-          // ─── Learning Engine Integration ──────────────────────────
-          if (result.success) {
-            try {
-              recordExecution(
-                `google-${campaignId}-${Date.now()}`,
-                clientId,
-                "google",
-                campaignId,
-                campaignName,
-                "campaign",
-                googleAction,
-                action.parameters?.reason || actionPlan.strategic_rationale,
-                analysisData,
-                actionPlan.strategic_rationale,
-                "AI Agent"
-              );
-            } catch (err: any) {
-              console.warn(`[AI Command] Learning record failed: ${err.message}`);
-            }
-          }
-        } finally {
-          for (const [key, value] of Object.entries(previousGoogleEnv)) {
-            if (value === undefined) delete process.env[key];
-            else process.env[key] = value;
+        // ─── Learning Engine Integration ──────────────────────────
+        if (result.success) {
+          try {
+            recordExecution(
+              `google-${campaignId}-${Date.now()}`,
+              clientId,
+              "google",
+              campaignId,
+              campaignName,
+              "campaign",
+              googleAction,
+              action.parameters?.reason || actionPlan.strategic_rationale,
+              analysisData,
+              actionPlan.strategic_rationale,
+              "AI Agent"
+            );
+          } catch (err: any) {
+            console.warn(`[AI Command] Learning record failed: ${err.message}`);
           }
         }
       }

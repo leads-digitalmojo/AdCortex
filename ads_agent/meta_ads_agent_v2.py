@@ -95,16 +95,32 @@ if _client_creds:
     if _client_creds["access_token"]:
         os.environ["META_ACCESS_TOKEN"] = _client_creds["access_token"]
 
-# Final Configuration
-AD_ACCOUNT_ID = os.environ.get("META_AD_ACCOUNT_ID", "391022327028566").replace("act_", "")
+# Final Configuration.
+# No hardcoded ad-account default: this script is invoked once per client (via
+# --client / the TS scheduler injecting that client's own credentials as env vars),
+# and a literal fallback account id here meant that any client reaching this point
+# without its own credentials silently queried that one hardcoded account instead —
+# writing that account's real campaign data into the requested client's own analysis
+# files, under the requested client's name. 36 of ~40 clients had picked up one
+# shared account's numbers this way before this was caught.
+AD_ACCOUNT_ID = os.environ.get("META_AD_ACCOUNT_ID", "").replace("act_", "")
 ACCESS_TOKEN = os.environ.get("META_ACCESS_TOKEN", "")
 
-# Legacy Fallback (optional)
+# Legacy fallback file — dormant unless someone hand-creates it; not populated by
+# the app itself. Kept only for pre-multi-tenant local dev, never as a network default.
 if not ACCESS_TOKEN:
     creds_path = os.path.join(os.path.dirname(__file__), "meta_credentials.json")
     if os.path.exists(creds_path):
         with open(creds_path) as f:
             ACCESS_TOKEN = json.load(f).get("access_token", "")
+
+if not ACCESS_TOKEN or not AD_ACCOUNT_ID:
+    raise SystemExit(
+        f"No Meta Ads credentials resolved for client '{_CLIENT_ID}'. Configure them via "
+        f"the app's Manage Clients > Credentials panel (writes to the DB, read by the "
+        f"scheduler), or pass META_ACCESS_TOKEN / META_AD_ACCOUNT_ID explicitly in this "
+        f"process's environment. Refusing to fall back to a shared default account."
+    )
 API_VERSION = "v21.0"
 BASE_URL = f"https://graph.facebook.com/{API_VERSION}"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))

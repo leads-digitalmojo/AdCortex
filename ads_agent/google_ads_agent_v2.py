@@ -61,6 +61,18 @@ def _normalize_google_account_id(value):
         return ""
     return "".join(ch for ch in str(value) if ch.isdigit())
 
+# Which Google/Meta account to query, not how to authenticate in general. These must
+# come from an explicit per-client source (the TS scheduler injecting this client's
+# real credentials as env vars before spawning this process, or a GOOGLE_<CLIENT>_*
+# / META_<CLIENT>_* scoped var) — never from a shared value in .env. A shared value
+# here is exactly how running this script for one client with no credentials of its
+# own silently queried a different, unrelated account and wrote that account's real
+# campaign data into the requested client's own analysis files under its name.
+_ACCOUNT_IDENTITY_ENV_KEYS = {
+    "GOOGLE_CUSTOMER_ID", "GOOGLE_MCC_ID", "GOOGLE_DEVELOPER_TOKEN",
+    "META_AD_ACCOUNT_ID", "META_ACCESS_TOKEN",
+}
+
 # ── Load .env from project tree (works standalone without python-dotenv) ──
 def _load_dotenv():
     """Search for .env file in script dir and parent dirs, load if found."""
@@ -84,7 +96,7 @@ def _load_dotenv():
                     key, _, val = line.partition("=")
                     key = key.strip()
                     val = val.strip().strip('"').strip("'")
-                    if key and key not in os.environ:  # don't override existing env vars
+                    if key and key not in os.environ and key not in _ACCOUNT_IDENTITY_ENV_KEYS:
                         os.environ[key] = val
             break
         except Exception:
@@ -146,13 +158,29 @@ if _client_creds:
     os.environ["GOOGLE_CUSTOMER_ID"] = _client_creds["default_client_id"] or ""
 
     MCC_ACCOUNT_ID = _client_creds["login_customer_id"] or os.environ.get("GOOGLE_MCC_ID", "")
-    CLIENT_ACCOUNT_ID = _client_creds["default_client_id"] or os.environ.get("GOOGLE_CUSTOMER_ID", "3120813693")
-    DEV_TOKEN = _client_creds["developer_token"] or os.environ.get("GOOGLE_DEVELOPER_TOKEN", "_3UIxhdvv6QErcI8BVJCNw")
+    CLIENT_ACCOUNT_ID = _client_creds["default_client_id"] or os.environ.get("GOOGLE_CUSTOMER_ID", "")
+    DEV_TOKEN = _client_creds["developer_token"] or os.environ.get("GOOGLE_DEVELOPER_TOKEN", "")
 else:
-    # Fallback to legacy hardcoded values (amara default)
+    # No entry in clients_credentials.json (that file is effectively unused — the
+    # app's real credential store is Postgres, reached via the TS scheduler, which
+    # injects this exact client's GOOGLE_CUSTOMER_ID/GOOGLE_MCC_ID/GOOGLE_DEVELOPER_TOKEN
+    # as env vars before spawning this process). Those env vars are read here as-is
+    # when present. What must NOT happen is silently defaulting to some other
+    # account when they are absent — that literal default ("3120813693", Amara's
+    # real customer id) is what caused a run for a different client to overwrite
+    # that client's own analysis files with Amara's real campaign data.
     MCC_ACCOUNT_ID = os.environ.get("GOOGLE_MCC_ID", "")
-    CLIENT_ACCOUNT_ID = os.environ.get("GOOGLE_CUSTOMER_ID", "3120813693")
-    DEV_TOKEN = os.environ.get("GOOGLE_DEVELOPER_TOKEN", "_3UIxhdvv6QErcI8BVJCNw")
+    CLIENT_ACCOUNT_ID = os.environ.get("GOOGLE_CUSTOMER_ID", "")
+    DEV_TOKEN = os.environ.get("GOOGLE_DEVELOPER_TOKEN", "")
+
+if not CLIENT_ACCOUNT_ID or not DEV_TOKEN:
+    raise SystemExit(
+        f"No Google Ads credentials resolved for client '{_CLIENT_ID}'. Configure them via "
+        f"the app's Manage Clients > Credentials panel (writes to the DB, read by the "
+        f"scheduler), or pass GOOGLE_CUSTOMER_ID / GOOGLE_DEVELOPER_TOKEN (and GOOGLE_MCC_ID, "
+        f"GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN as needed) explicitly in this process's "
+        f"environment. Refusing to fall back to a shared default account."
+    )
 
 SOURCE_ID = "google_ads__pipedream"  # Legacy - now using direct REST API
 

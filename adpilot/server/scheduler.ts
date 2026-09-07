@@ -313,19 +313,19 @@ async function loadClientsWithCredentials(): Promise<Array<{
               GOOGLE_CLIENT_SECRET: process.env[`GOOGLE_${envKey("CLIENT_SECRET")}`] as string,
               GOOGLE_REFRESH_TOKEN: process.env[`GOOGLE_${envKey("REFRESH_TOKEN")}`] as string,
               GOOGLE_DEVELOPER_TOKEN: (process.env[`GOOGLE_${envKey("DEVELOPER_TOKEN")}`] as string) || (process.env.GOOGLE_DEVELOPER_TOKEN || ""),
-              GOOGLE_MCC_ID: (process.env[`GOOGLE_${envKey("MCC_ID")}`] as string) || (process.env.GOOGLE_MCC_ID || ""),
-              GOOGLE_CUSTOMER_ID: (process.env[`GOOGLE_${envKey("CUSTOMER_ID")}`] as string) || (process.env.GOOGLE_CUSTOMER_ID || ""),
+              GOOGLE_MCC_ID: (process.env[`GOOGLE_${envKey("MCC_ID")}`] as string) || "",
+              GOOGLE_CUSTOMER_ID: (process.env[`GOOGLE_${envKey("CUSTOMER_ID")}`] as string) || "",
             }
-            : (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET && process.env.GOOGLE_REFRESH_TOKEN)
-              ? {
-                GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
-                GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
-                GOOGLE_REFRESH_TOKEN: process.env.GOOGLE_REFRESH_TOKEN,
-                GOOGLE_DEVELOPER_TOKEN: process.env.GOOGLE_DEVELOPER_TOKEN || "",
-                GOOGLE_MCC_ID: process.env.GOOGLE_MCC_ID || "",
-                GOOGLE_CUSTOMER_ID: process.env.GOOGLE_CUSTOMER_ID || "",
-              }
-              : undefined
+            // Deliberately NO bare-env-var fallback here (was: process.env.GOOGLE_CLIENT_ID
+            // etc with no client prefix). That let every client with no credentials of its
+            // own quietly sync against whichever single Google account happened to be in
+            // the server's .env, and get that account's real campaign data written into
+            // its own analysis files under its own name. 36 of ~40 clients had picked up
+            // one shared account's numbers this way before this was caught — see the
+            // parallel removal in google_ads_agent_v2.py / meta_ads_agent_v2.py for the
+            // matching fallback on the Python side, which the subprocess falls back to if
+            // this function ever again returns undefined for a client that still runs.
+            : undefined
         );
 
       // Meta Credentials — DB only, no ENV fallback
@@ -341,12 +341,11 @@ async function loadClientsWithCredentials(): Promise<Array<{
               META_ACCESS_TOKEN: process.env[`META_${envKey("ACCESS_TOKEN")}`] as string,
               META_AD_ACCOUNT_ID: process.env[`META_${envKey("AD_ACCOUNT_ID")}`] as string,
             }
-            : (process.env.META_ACCESS_TOKEN && process.env.META_AD_ACCOUNT_ID)
-              ? {
-                META_ACCESS_TOKEN: process.env.META_ACCESS_TOKEN,
-                META_AD_ACCOUNT_ID: process.env.META_AD_ACCOUNT_ID,
-              }
-              : undefined
+            // No bare process.env.META_ACCESS_TOKEN fallback — see the comment on the
+            // Google branch above. This was the one actually firing: 36 clients with no
+            // Meta credentials of their own were syncing against the one account in
+            // the server's .env and showing its campaigns as their own.
+            : undefined
         );
 
       results.push({ id: c.id, googleCreds, metaCreds });
@@ -393,6 +392,18 @@ async function runWithConcurrency<T>(
 }
 
 /** Sync one client on one platform: run the agent, record state, persist snapshots. */
+// Bare, unscoped account credentials that must never reach a per-client agent
+// subprocess via inherited process.env — they belong to whichever single account
+// happens to be configured in the server's .env, not to the client being synced.
+// loadClientsWithCredentials() no longer offers these as a fallback, but this strips
+// them from the child process explicitly too, so a client can never pick up another
+// account's data even if that filter is ever changed or bypassed.
+const UNSCOPED_CREDENTIAL_ENV_KEYS = [
+  "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN",
+  "GOOGLE_DEVELOPER_TOKEN", "GOOGLE_MCC_ID", "GOOGLE_CUSTOMER_ID",
+  "META_ACCESS_TOKEN", "META_AD_ACCOUNT_ID",
+];
+
 async function syncClientPlatform(
   client: { id: string; googleCreds?: Record<string, string>; metaCreds?: Record<string, string> },
   platform: AgentPlatform,
@@ -401,6 +412,9 @@ async function syncClientPlatform(
 ): Promise<void> {
   const label = platform === "google" ? "Google" : "Meta";
   const creds = platform === "google" ? client.googleCreds : client.metaCreds;
+  const childEnv = { ...process.env };
+  for (const key of UNSCOPED_CREDENTIAL_ENV_KEYS) delete childEnv[key];
+  Object.assign(childEnv, creds);
 
   log(`Scheduler: Running ${label} Ads Agent for client '${client.id}'...`, "scheduler");
   inFlightSyncs.add(syncKey(client.id, platform));
@@ -414,7 +428,7 @@ async function syncClientPlatform(
     await execFileAsync(pythonPath, [agentPath, "--client", client.id, "--multi-cadence"], {
       cwd: ADS_AGENT_DIR,
       timeout: 600000,
-      env: { ...process.env, ...creds },
+      env: childEnv,
     });
 
     setPlatformSyncState(client.id, platform, {

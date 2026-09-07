@@ -33,10 +33,12 @@ function normalizeGoogleAccountId(value?: string | null): string {
   return String(value ?? "").replace(/\D/g, "");
 }
 
-// Legacy single-tenant fallback, used only when a caller doesn't pass explicit
-// per-client credentials/customerId (kept for the unused getGoogleEntityStatus
-// helper below). Every action-executing path in routes.ts now passes the
-// client's own credentials explicitly — see executeGoogleAction.
+// Legacy single-tenant default, kept only as the unused getGoogleEntityStatus
+// helper's default parameter below — nothing calls that helper. Do NOT use this as a
+// fallback anywhere a real action executes: it resolves to whichever one account
+// happens to be in this process's env (see the matching removal in scheduler.ts and
+// the ads_agent Python agents), and falling back to it here would mean silently
+// pausing/enabling/rebudgeting a DIFFERENT client's live campaigns.
 function getGoogleCustomerId(): string {
   return normalizeGoogleAccountId(process.env.GOOGLE_CUSTOMER_ID);
 }
@@ -259,7 +261,12 @@ async function buildHeaders(customerId: string, creds: Credentials): Promise<Rec
     "developer-token": creds.developer_token,
     "Content-Type": "application/json",
   };
-  const loginCustomerId = normalizeGoogleAccountId(creds.login_customer_id || getGoogleLoginCustomerId());
+  // creds.login_customer_id comes from this specific client's own stored credentials
+  // (see executeGoogleAction above) — no fallback to a shared MCC id here, for the
+  // same reason customerId has none: a wrong login-customer-id for one client
+  // happening to also manage another client's account is exactly the shape of bug
+  // this file's other fallback removal was fixing.
+  const loginCustomerId = normalizeGoogleAccountId(creds.login_customer_id || "");
   if (loginCustomerId && loginCustomerId !== normalizeGoogleAccountId(customerId)) {
     headers["login-customer-id"] = loginCustomerId;
   }
@@ -602,14 +609,16 @@ export async function executeGoogleAction(req: GoogleExecutionRequest): Promise<
     platform: "google" as const,
   };
 
-  // Resolve which ad account and credentials this action runs against. Callers are
-  // expected to pass these explicitly (routes.ts resolves them from the client's own
-  // stored credentials) — falling back to the legacy shared config here would risk
-  // silently executing against the wrong client's Google Ads account.
+  // Resolve which ad account and credentials this action runs against. Callers MUST
+  // pass these explicitly (routes.ts resolves them from the client's own stored
+  // credentials) — there is deliberately no fallback to a shared/default account
+  // here. A fallback would mean a caller that forgot to resolve this client's real
+  // customerId silently pauses/enables/rebudgets a DIFFERENT client's live campaigns
+  // instead of failing loudly.
   let customerId: string;
   let creds: Credentials;
   try {
-    customerId = req.customerId ? normalizeGoogleAccountId(req.customerId) : getGoogleCustomerId();
+    customerId = req.customerId ? normalizeGoogleAccountId(req.customerId) : "";
     if (!customerId) {
       throw new Error("No Google Ads customer ID provided for this action");
     }

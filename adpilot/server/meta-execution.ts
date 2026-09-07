@@ -21,8 +21,15 @@ const META_BASE_URL = `https://graph.facebook.com/${META_API_VERSION}`;
 const DATA_BASE = path.resolve(import.meta.dirname, "../../ads_agent/data");
 const AUDIT_LOG_PATH = path.join(DATA_BASE, "execution_audit_log.json");
 
+// No shared/global fallback: every real call site (routes.ts, via
+// resolveMetaExecCreds) resolves and passes the specific client's own access token.
+// process.env.META_ACCESS_TOKEN is one specific client's real token (whichever
+// happens to be in .env) — falling back to it here would mean an action with no
+// token of its own silently mutates that other client's live Meta account instead
+// of failing. metaApiPost/metaApiGet below send an empty token when none is passed,
+// which Meta's API rejects cleanly rather than routing the action anywhere.
 function getMetaAccessToken(): string {
-  return process.env.META_ACCESS_TOKEN || "";
+  return "";
 }
 
 // ─── Types ────────────────────────────────────────────────────────

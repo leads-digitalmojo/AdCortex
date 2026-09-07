@@ -220,6 +220,19 @@ function isPlaceholderSecret(value?: string): boolean {
   return !value || value.trim() === "" || value.trim().startsWith("YOUR_");
 }
 
+/** Whether a client has usable credentials for a platform — same test the scheduler
+ * applies before it will run an agent for that client/platform pair. Used to reject
+ * a manual sync request up front instead of reporting "Agent run triggered" for a
+ * run that is guaranteed to no-op with no visible error. */
+async function hasUsableCredentials(clientId: string, platform: "meta" | "google"): Promise<boolean> {
+  const creds = await storage.getCredentials(clientId);
+  if (platform === "meta") {
+    return !isPlaceholderSecret(creds?.meta?.accessToken) && !isPlaceholderSecret(creds?.meta?.adAccountId);
+  }
+  const g = creds?.google as any;
+  return !isPlaceholderSecret(g?.clientId) && !isPlaceholderSecret(g?.clientSecret) && !isPlaceholderSecret(g?.refreshToken);
+}
+
 function normalizeGoogleAccountId(value?: string): string {
   return String(value ?? "").replace(/\D/g, "");
 }
@@ -3766,6 +3779,21 @@ export async function registerRoutes(
         return res.status(400).json({ error: "You have no clients to sync" });
       }
       clientIds = visible;
+    }
+
+    // Don't report "sync started" for a request that's guaranteed to no-op. The
+    // scheduler silently skips any client/platform pair with no usable credentials —
+    // previously this endpoint still answered "Agent run triggered", so clicking Sync
+    // on a client with no Meta connection configured looked like it worked, forever,
+    // with nothing to explain why the data never changed.
+    if (clientIds?.length === 1 && platforms?.length === 1) {
+      const ok = await hasUsableCredentials(clientIds[0], platforms[0]);
+      if (!ok) {
+        return res.status(400).json({
+          error: `No ${platforms[0] === "google" ? "Google" : "Meta"} credentials configured for this client — add them from Manage Clients before syncing.`,
+          noCredentials: true,
+        });
+      }
     }
 
     // Don't report "sync started" when the same client/platform is already mid-run —
