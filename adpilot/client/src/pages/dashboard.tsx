@@ -718,6 +718,12 @@ export default function DashboardPage() {
   const isGoogle = activePlatform === "google";
   const cadenceLabel = (data as any)?.cadence || activeCadence || "";
   const periodLabel = getCadencePeriodLabel(cadenceLabel);
+  // The server substitutes the nearest available window when the selected one has
+  // never been generated for this client (a cadence added since its last agent run).
+  // Surfaced explicitly, because otherwise selecting "30D" and being shown 3 days
+  // of data is indistinguishable from the filter being broken.
+  const cadenceFellBack = !!(data as any)?.cadence_fallback;
+  const requestedCadence = (data as any)?.requested_cadence as string | undefined;
   const rawAp = (data as any)?.account_pulse || {};
   const rawCampaignAudit = Array.isArray((data as any)?.campaign_audit) ? (data as any)?.campaign_audit : Array.isArray((data as any)?.campaigns) ? (data as any)?.campaigns : [];
   const thresholds = (data as any)?.dynamic_thresholds || (data as any)?.thresholds || {};
@@ -1409,6 +1415,11 @@ export default function DashboardPage() {
                   ? `Showing: ${cadenceDisplayMap[cadenceLabel] || "Last 7 Days"} | ${formatRangeDate(displayDateRange.since)} – ${formatRangeDate(displayDateRange.until)}`
                   : `Showing: ${cadenceDisplayMap[cadenceLabel] || "Last 7 Days"}`}
               </Badge>
+              {cadenceFellBack && requestedCadence && (
+                <Badge variant="destructive" className="w-fit font-semibold" data-testid="cadence-fallback-notice">
+                  {`${cadenceDisplayMap[requestedCadence] || requestedCadence.replace(/_/g, " ")} not synced yet — run the agent to populate it`}
+                </Badge>
+              )}
               {lastSuccessfulFetchDate && (
                 // Previously always rendered as muted secondary text regardless of age —
                 // "72h ago" and "2h ago" looked identically unimportant. Color now escalates

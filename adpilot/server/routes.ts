@@ -547,6 +547,48 @@ function getRecommendationActionsForPrefix(prefix: string): Record<string, Actio
   return result;
 }
 
+// Nominal length of each cadence window, used only to order fallbacks by how close
+// they are to what was asked for. Mirrors CADENCE_WINDOWS in both agents; "monthly"
+// is month-to-date so its real length varies through the month — the mid-month
+// average is a good enough ordering hint.
+const CADENCE_NOMINAL_DAYS: Record<string, number> = {
+  daily: 1,
+  twice_weekly: 3,
+  weekly: 7,
+  biweekly: 14,
+  monthly: 16,
+  last_30_days: 30,
+};
+
+/** Cadence names this client/platform actually has a file for. */
+function listCadenceFiles(basePath: string): string[] {
+  const dir = path.dirname(basePath);
+  if (!fs.existsSync(dir)) return [];
+  return fs
+    .readdirSync(dir)
+    .map((name) => name.match(/^analysis_(.+)\.json$/)?.[1])
+    .filter((name): name is string => !!name && name !== "last_error");
+}
+
+/**
+ * Available cadences ordered by suitability as a stand-in for `requested`.
+ *
+ * Windows at least as wide as the one asked for come first (narrowest of those
+ * first), then narrower ones (widest of those first). Preferring wider matters:
+ * substituting the 3-day window for a 30-day request makes every total roughly ten
+ * times too small, which reads as broken data, whereas a slightly-too-wide window
+ * is merely approximate. Either way the caller is told a substitution happened.
+ */
+function nearestCadences(requested: string, available: string[]): string[] {
+  const target = CADENCE_NOMINAL_DAYS[requested] ?? 7;
+  const days = (name: string) => CADENCE_NOMINAL_DAYS[name] ?? 7;
+  const candidates = available.filter((name) => name !== requested);
+
+  const wider = candidates.filter((name) => days(name) >= target).sort((a, b) => days(a) - days(b));
+  const narrower = candidates.filter((name) => days(name) < target).sort((a, b) => days(b) - days(a));
+  return [...wider, ...narrower];
+}
+
 async function readAnalysisData(clientId: string, platform: string, cadence?: string): Promise<any> {
   const cacheKey = getCacheKey(clientId, platform, cadence);
   const cached = analysisCache.get(cacheKey);
@@ -556,38 +598,70 @@ async function readAnalysisData(clientId: string, platform: string, cadence?: st
   }
   console.log(`[readAnalysisData] [CACHE MISS/INVALIDATED] Recalculating analysis scores for ${clientId}/${platform} (${cadence ?? 'default'})...`);
 
-  let raw: any = null;
+  const currentRegistry = await loadRegistry();
+  const client = currentRegistry.find((c) => c.id === clientId);
+  if (!client) {
+    throw new Error(`Client '${clientId}' not found in registry`);
+  }
+  const platformConfig = client.platforms[platform];
+  if (!platformConfig) {
+    throw new Error(`Platform '${platform}' not configured for client '${clientId}'`);
+  }
+  const basePath = resolvePlatformDataPath(clientId, platform, platformConfig);
 
-  // 1. Try DB first (Most reliable)
-  const snap = await loadAnalysisSnapshot(clientId, platform, cadence);
-  if (snap) {
-    raw = snap;
+  /** Load one specific cadence: DB snapshot first, then its own file. Null if absent. */
+  const loadCadence = async (name: string): Promise<any | null> => {
+    const snap = await loadAnalysisSnapshot(clientId, platform, name);
+    if (snap) return snap;
+    const cadencePath = basePath.replace(/analysis\.json$/, `analysis_${name}.json`);
+    if (fs.existsSync(cadencePath)) {
+      try {
+        return JSON.parse(fs.readFileSync(cadencePath, "utf-8"));
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  };
+
+  let raw: any = null;
+  let servedCadence = cadence;
+  let fellBack = false;
+
+  if (cadence) {
+    raw = await loadCadence(cadence);
+
+    // The requested window has never been generated for this client — most often a
+    // cadence that was added after the client's last agent run. This used to drop
+    // straight to analysis.json (the twice-weekly copy) with no signal at all, so
+    // picking "30D" quietly showed 3 days of data and the page labelled itself
+    // "twice weekly" while the sidebar still highlighted 30D. Substitute the
+    // closest window that does exist, and say so.
+    if (!raw) {
+      for (const candidate of nearestCadences(cadence, listCadenceFiles(basePath))) {
+        raw = await loadCadence(candidate);
+        if (raw) {
+          servedCadence = candidate;
+          fellBack = true;
+          console.warn(
+            `[readAnalysisData] '${cadence}' not available for ${clientId}/${platform} — serving '${candidate}' instead`,
+          );
+          break;
+        }
+      }
+    }
   }
 
-  // 2. File fallback
+  // No cadence asked for, or nothing cadence-specific exists: the default file.
   if (!raw) {
-    const currentRegistry = await loadRegistry();
-    const client = currentRegistry.find((c) => c.id === clientId);
-    if (!client) {
-      throw new Error(`Client '${clientId}' not found in registry`);
-    }
-    const platformConfig = client.platforms[platform];
-    if (!platformConfig) {
-      throw new Error(`Platform '${platform}' not configured for client '${clientId}'`);
-    }
-
-    let dataPath = resolvePlatformDataPath(clientId, platform, platformConfig);
-
-    if (cadence) {
-      const cadencePath = dataPath.replace(/analysis\.json$/, `analysis_${cadence}.json`);
-      if (fs.existsSync(cadencePath)) dataPath = cadencePath;
-    }
-
-    if (!fs.existsSync(dataPath)) {
+    if (!fs.existsSync(basePath)) {
       throw new Error(`No analysis data found (DB or File) for ${clientId}/${platform}`);
     }
-
-    raw = JSON.parse(fs.readFileSync(dataPath, "utf-8"));
+    raw = JSON.parse(fs.readFileSync(basePath, "utf-8"));
+    if (cadence) {
+      servedCadence = raw?.cadence || "twice_weekly";
+      fellBack = servedCadence !== cadence;
+    }
   }
 
   // 3. Load Benchmarks for health score calculation
@@ -618,6 +692,13 @@ async function readAnalysisData(clientId: string, platform: string, cadence?: st
   const data = platform === "google"
     ? normalizeGoogleAnalysis(raw)
     : normalizeMetaAnalysis(raw);
+
+  // Tell the caller which window it actually got. Without this the UI can only read
+  // the payload's own `cadence`, so a substituted window looked like the user had
+  // simply selected that other window.
+  data.requested_cadence = cadence ?? null;
+  data.served_cadence = servedCadence ?? data.cadence ?? null;
+  data.cadence_fallback = !!fellBack;
 
   analysisCache.set(cacheKey, { data, ts: Date.now() });
 
