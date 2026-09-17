@@ -212,7 +212,11 @@ CADENCE_WINDOWS = {
     "twice_weekly": {"since": str(DATE_3D_AGO),  "until": str(YESTERDAY), "label": f"Last 3 days ({DATE_3D_AGO} to {YESTERDAY})"},
     "weekly":       {"since": str(DATE_7D_AGO),  "until": str(YESTERDAY), "label": f"Last 7 days ({DATE_7D_AGO} to {YESTERDAY})"},
     "biweekly":     {"since": str(DATE_14D_AGO), "until": str(YESTERDAY), "label": f"Last 14 days ({DATE_14D_AGO} to {YESTERDAY})"},
-    "monthly":      {"since": str(DATE_30D_AGO), "until": str(YESTERDAY), "label": f"Last 30 days ({DATE_30D_AGO} to {YESTERDAY})"},
+    "last_30_days": {"since": str(DATE_30D_AGO), "until": str(YESTERDAY), "label": f"Last 30 days ({DATE_30D_AGO} to {YESTERDAY})"},
+    # Was a rolling 30 days while the dashboard labelled it "Month to Date" — two
+    # different periods under one name. A rolling 30-day view now has its own
+    # cadence above, and this one is genuinely month-to-date, matching Meta.
+    "monthly":      {"since": str(MTD_START), "until": str(YESTERDAY), "label": f"MTD ({MTD_START} to {YESTERDAY})"},
 }
 
 # ── Monthly Targets (defaults, overridden by config.json) ──
@@ -586,6 +590,24 @@ def get_benchmark_for_type(ctype):
     if ctype in BENCHMARKS:
         return BENCHMARKS[ctype]
     return BENCHMARKS["location"]
+
+def delivered_in_window(c):
+    """Did this campaign actually run during the cadence window?
+
+    Every aggregation used to gate on `status == "ENABLED"`, i.e. on whether the
+    campaign is live *right now*. A campaign that spent the whole window and was
+    paused yesterday was therefore dropped from the campaign list, the account
+    totals, CVR and the Search/Demand Gen split — so an account whose campaigns had
+    all been paused reported ₹0 spend, zero campaigns and an empty Demand Gen tab
+    while its daily trend line still showed the real money. Status is still carried
+    on every row, so the UI can show PAUSED; it just no longer erases the history.
+    """
+    return (
+        c.get("status") == "ENABLED"
+        or sf(c.get("cost")) > 0
+        or si(c.get("impressions")) > 0
+    )
+
 
 def is_search_type(ctype):
     return ctype in ("branded", "location")
@@ -1416,7 +1438,11 @@ def collect_data(cadence_window=None):
 
 def analyze_account_pulse(campaigns, historical, daily_trends=None):
     """Account-level health check + MTD pacing."""
-    active = [c for c in campaigns if c["status"] == "ENABLED"]
+    # Totals describe the window, so they must include spend from campaigns that
+    # have since been paused — otherwise the account reads ₹0 the day its campaigns
+    # are switched off. `active_campaigns` below still counts only live ones.
+    active = [c for c in campaigns if delivered_in_window(c)]
+    enabled = [c for c in campaigns if c["status"] == "ENABLED"]
 
     total_spend = sum(c["cost"] for c in active)
     total_leads = sum(c["conversions"] for c in active)
@@ -1456,7 +1482,9 @@ def analyze_account_pulse(campaigns, historical, daily_trends=None):
         hist_spends = []
         for h in historical[:7]:
             hcamps = h.get("data", {}).get("campaigns", [])
-            hs = sum(c.get("cost", 0) for c in hcamps if c.get("status") == "ENABLED")
+            # Same rule as the current-window totals above — otherwise pausing a
+            # campaign makes history look artificially higher than today.
+            hs = sum(c.get("cost", 0) for c in hcamps if delivered_in_window(c))
             if hs > 0:
                 hist_spends.append(hs)
         if hist_spends:
@@ -1492,7 +1520,7 @@ def analyze_account_pulse(campaigns, historical, daily_trends=None):
         "overall_cpl": round(overall_cpl, 2),
         "overall_cpsv": round(overall_cpsv, 2),
         "overall_cvr": round(overall_cvr, 2),
-        "active_campaigns": len(active),
+        "active_campaigns": len(enabled),
         "mtd_pacing": {
             "days_elapsed": days_elapsed,
             "days_remaining": days_remaining,
@@ -1535,7 +1563,7 @@ def analyze_campaigns(campaigns, ad_groups, quality_score_by_campaign=None):
         ag_by_campaign[ag["campaign_id"]].append(ag)
 
     for c in campaigns:
-        if c["status"] != "ENABLED":
+        if not delivered_in_window(c):
             continue
 
         ctype = c["campaign_type"]
@@ -1990,15 +2018,15 @@ def analyze_bidding(ad_groups, campaigns):
 
 def analyze_cvr(campaigns):
     """CVR deep analysis with root cause determination."""
-    search_campaigns = [c for c in campaigns if is_search_type(c["campaign_type"]) and c["status"] == "ENABLED"]
-    dg_campaigns = [c for c in campaigns if is_dg_type(c["campaign_type"]) and c["status"] == "ENABLED"]
+    search_campaigns = [c for c in campaigns if is_search_type(c["campaign_type"]) and delivered_in_window(c)]
+    dg_campaigns = [c for c in campaigns if is_dg_type(c["campaign_type"]) and delivered_in_window(c)]
 
     per_type = {}
     for ctype_group in [("branded", "branded"), ("location", "location"),
                         ("demand_gen", "demand_gen")]:
         label, prefix = ctype_group
         matching = [c for c in campaigns
-                   if c["status"] == "ENABLED" and
+                   if delivered_in_window(c) and
                    (c["campaign_type"] == prefix or c["campaign_type"].startswith(prefix))]
         if matching:
             total_clicks = sum(c["clicks"] for c in matching)
@@ -2101,8 +2129,8 @@ def analyze_cvr(campaigns):
 
     return {
         "overall_cvr": round(safe_div(
-            sum(c["conversions"] for c in campaigns if c["status"] == "ENABLED"),
-            sum(c["clicks"] for c in campaigns if c["status"] == "ENABLED")
+            sum(c["conversions"] for c in campaigns if delivered_in_window(c)),
+            sum(c["clicks"] for c in campaigns if delivered_in_window(c))
         ) * 100, 2),
         "per_campaign_type": per_type,
         "per_campaign": search_cvrs,
@@ -2289,7 +2317,7 @@ def analyze_geo(campaigns, cadence_window=None):
 
 def analyze_conversion_sanity(campaigns, historical):
     """Check conversion tracking health and data integrity."""
-    active = [c for c in campaigns if c["status"] == "ENABLED"]
+    active = [c for c in campaigns if delivered_in_window(c)]
     total_clicks = sum(c["clicks"] for c in active)
     total_conv = sum(c["conversions"] for c in active)
     overall_cvr = safe_div(total_conv, total_clicks) * 100
@@ -2324,7 +2352,7 @@ def analyze_conversion_sanity(campaigns, historical):
     # Historical comparison
     if historical:
         prev = historical[0].get("data", {}).get("campaigns", [])
-        prev_conv = sum(c.get("conversions", 0) for c in prev if c.get("status") == "ENABLED")
+        prev_conv = sum(c.get("conversions", 0) for c in prev if delivered_in_window(c))
         if prev_conv > 0 and total_conv == 0:
             anomalies.append({
                 "type": "sudden_drop",
@@ -2559,7 +2587,7 @@ def generate_intellect_insights(campaigns, account_pulse, cvr_analysis, bidding)
     pie = PerformanceIntelligenceEngine(benchmarks=BENCHMARKS, target_cpl=CPL_TARGET)
     pde = PatternDetectionEngine()
 
-    active = [c for c in campaigns if c["status"] == "ENABLED"]
+    active = [c for c in campaigns if delivered_in_window(c)]
     
     # 1. PIE Diagnosis for each campaign
     for c in active:
@@ -4363,6 +4391,48 @@ def generate_recommendations(campaigns, account_pulse, auto_pause, playbooks_tri
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━ MAIN ENGINE ━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+def _verify_totals(account_pulse, daily_trends, campaign_analysis):
+    """Cross-check the account totals against the per-day and per-campaign rows.
+
+    Three independent views of the same window should agree: the account pulse
+    totals, the sum of the daily trend rows, and the sum of the campaign rows. Where
+    they don't, the dashboard should say so rather than claim a match.
+    """
+    reported_spend = sf(account_pulse.get("total_spend"))
+    reported_leads = sf(account_pulse.get("total_leads"))
+
+    daily_rows = daily_trends if isinstance(daily_trends, list) else []
+    daily_spend = sum(sf(d.get("spend")) for d in daily_rows)
+    daily_leads = sum(sf(d.get("leads")) for d in daily_rows)
+
+    campaign_spend = sum(sf(c.get("cost")) for c in campaign_analysis)
+    campaign_leads = sum(sf(c.get("conversions")) for c in campaign_analysis)
+
+    def _pct(a, b):
+        base = max(abs(a), abs(b))
+        return round(abs(a - b) / base * 100, 2) if base > 0 else 0.0
+
+    spend_pct = _pct(reported_spend, daily_spend)
+    leads_pct = _pct(reported_leads, daily_leads)
+
+    return {
+        "verified": spend_pct < 5 and leads_pct < 5,
+        "verified_at": str(NOW),
+        "source": "api_daily_reconciliation",
+        "api_spend": round(reported_spend, 2),
+        "daily_spend_sum": round(daily_spend, 2),
+        "campaign_spend_sum": round(campaign_spend, 2),
+        "spend_discrepancy_pct": spend_pct,
+        "reported_leads": round(reported_leads, 2),
+        "daily_leads_sum": round(daily_leads, 2),
+        "entity_leads": round(campaign_leads, 2),
+        "leads_discrepancy": round(abs(reported_leads - daily_leads), 2),
+        "leads_discrepancy_pct": leads_pct,
+        "daily_rows_found": len(daily_rows),
+        "verification_status": "MATCH" if (spend_pct < 5 and leads_pct < 5) else "MISMATCH",
+    }
+
+
 def run_analysis(cadence="twice_weekly"):
     """Run the full analysis pipeline."""
     window = CADENCE_WINDOWS.get(cadence, CADENCE_WINDOWS["twice_weekly"])
@@ -4376,10 +4446,10 @@ def run_analysis(cadence="twice_weekly"):
 
     # Modules to activate based on cadence
     # Enable key analysis modules for twice_weekly+ to ensure dashboard data is populated
-    run_bidding = cadence in ("twice_weekly", "weekly", "biweekly", "monthly")
-    run_qs = cadence in ("twice_weekly", "weekly", "biweekly", "monthly")
-    run_search_terms_deep = cadence in ("twice_weekly", "weekly", "biweekly", "monthly")
-    run_breakdowns = cadence in ("twice_weekly", "weekly", "biweekly", "monthly")
+    run_bidding = cadence in ("twice_weekly", "weekly", "biweekly", "last_30_days", "monthly")
+    run_qs = cadence in ("twice_weekly", "weekly", "biweekly", "last_30_days", "monthly")
+    run_search_terms_deep = cadence in ("twice_weekly", "weekly", "biweekly", "last_30_days", "monthly")
+    run_breakdowns = cadence in ("twice_weekly", "weekly", "biweekly", "last_30_days", "monthly")
     run_funnel = cadence in ("monthly",)
 
     # 1. Collect data
@@ -4736,14 +4806,11 @@ def run_analysis(cadence="twice_weekly"):
             "breakdowns": run_breakdowns,
             "funnel": run_funnel,
         },
-        "data_verification": {
-            "verified": True,
-            "discrepancy_pct": 0.0,
-            "verified_at": str(NOW),
-            "source": "api_daily_reconciliation",
-            "daily_rows_found": len(ds.get("campaigns_raw", [])),
-            "verification_status": "MATCH"
-        }
+        # Real reconciliation, not an assertion. This used to be hardcoded to
+        # {"verified": True, "discrepancy_pct": 0.0, "verification_status": "MATCH"},
+        # so the dashboard's verification panel reported a clean match on every run
+        # no matter how far the numbers actually diverged.
+        "data_verification": _verify_totals(account_pulse, daily_trends, campaign_analysis),
     }
 
     # Save output — always save to analysis.json (latest) + cadence-specific file
@@ -4798,7 +4865,7 @@ def run_multi_cadence_analysis():
         analysis_monthly.json
         analysis.json  (copy of analysis_twice_weekly.json)
     """
-    cadence_order = ["daily", "twice_weekly", "weekly", "biweekly", "monthly"]
+    cadence_order = ["daily", "twice_weekly", "weekly", "biweekly", "last_30_days", "monthly"]
 
     # The five cadence windows are nested, so one fetch of their union serves
     # them all — see set_report_window(). Without this each cadence re-pulls the
@@ -4876,7 +4943,7 @@ if __name__ == "__main__":
     parser.add_argument("--client", default=_CLIENT_ID,
                        help="Client id to analyze (already resolved during startup)")
     parser.add_argument("--cadence", default="twice_weekly",
-                       choices=["daily", "twice_weekly", "weekly", "biweekly", "monthly"],
+                       choices=["daily", "twice_weekly", "weekly", "biweekly", "last_30_days", "monthly"],
                        help="Analysis cadence (ignored when --multi-cadence is set)")
     parser.add_argument("--multi-cadence", action="store_true",
                        help="Run analysis for ALL cadences and save each to its own file")

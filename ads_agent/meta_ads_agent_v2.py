@@ -132,15 +132,22 @@ TODAY = datetime.date.today()
 NOW = datetime.datetime.now()
 YESTERDAY = TODAY - datetime.timedelta(days=1)
 DATE_30D_AGO = TODAY - datetime.timedelta(days=30)
+DATE_3D_AGO = TODAY - datetime.timedelta(days=3)
 DATE_7D_AGO = TODAY - datetime.timedelta(days=7)
 DATE_14D_AGO = TODAY - datetime.timedelta(days=14)
 MTD_START = TODAY.replace(day=1)
 
+# Each window is the period its own name describes, and matches the Google agent's
+# CADENCE_WINDOWS exactly. These used to be shifted one step wider on Meta only —
+# "twice_weekly" pulled 7 days, "weekly" pulled 14 and "biweekly" pulled 30 — so
+# the same label showed a different period depending on which platform was
+# selected, and none of them matched what the label said.
 CADENCE_WINDOWS = {
     "daily":        {"since": str(YESTERDAY), "until": str(YESTERDAY), "label": f"Yesterday ({YESTERDAY})"},
-    "twice_weekly": {"since": str(DATE_7D_AGO), "until": str(YESTERDAY), "label": f"Last 7 days ({DATE_7D_AGO} to {YESTERDAY})"},
-    "weekly":       {"since": str(DATE_14D_AGO), "until": str(YESTERDAY), "label": f"Last 14 days ({DATE_14D_AGO} to {YESTERDAY})"},
-    "biweekly":     {"since": str(DATE_30D_AGO), "until": str(YESTERDAY), "label": f"Last 30 days ({DATE_30D_AGO} to {YESTERDAY})"},
+    "twice_weekly": {"since": str(DATE_3D_AGO), "until": str(YESTERDAY), "label": f"Last 3 days ({DATE_3D_AGO} to {YESTERDAY})"},
+    "weekly":       {"since": str(DATE_7D_AGO), "until": str(YESTERDAY), "label": f"Last 7 days ({DATE_7D_AGO} to {YESTERDAY})"},
+    "biweekly":     {"since": str(DATE_14D_AGO), "until": str(YESTERDAY), "label": f"Last 14 days ({DATE_14D_AGO} to {YESTERDAY})"},
+    "last_30_days": {"since": str(DATE_30D_AGO), "until": str(YESTERDAY), "label": f"Last 30 days ({DATE_30D_AGO} to {YESTERDAY})"},
     "monthly":      {"since": str(MTD_START), "until": str(YESTERDAY), "label": f"MTD ({MTD_START} to {YESTERDAY})"},
 }
 
@@ -278,11 +285,50 @@ SOP = {
     }),
 }
 
-LEAD_ACTION_TYPES = [
+# Meta reports conversions under an action_type that depends on how the account's
+# conversion point is configured, and the list below is consulted in order with the
+# first match winning (Meta double-reports the same conversion under several
+# overlapping aggregates, so summing them inflates leads).
+#
+# This list used to hold only the first three entries. Any account whose conversion
+# point was the website Lead pixel, a Messenger/WhatsApp conversation, a completed
+# registration or a custom conversion matched nothing at all — leads came back 0,
+# which made CPL 0 and dropped the campaign's score to 0 even while it was
+# delivering. The daily aggregation further down counted
+# "offsite_conversion.fb_pixel_lead" even though this list did not, so the two
+# disagreed and the data-verification panel reported a discrepancy.
+#
+# Ordered most-inclusive first. Override per client with "lead_action_types" in the
+# benchmarks file when an account's conversion point is something else entirely.
+DEFAULT_LEAD_ACTION_TYPES = [
+    # Standard aggregates — cover most setups on their own.
     "lead",
     "onsite_conversion.lead_grouped",
+    "offsite_conversion.fb_pixel_lead",
+    # Lead forms / registrations.
     "offsite_complete_registration_add_meta_leads",
+    "offsite_conversion.fb_pixel_complete_registration",
+    "complete_registration",
+    "onsite_conversion.lead_form_submit",
+    # Click-to-message campaigns, where the conversation *is* the lead.
+    "onsite_conversion.messaging_conversation_started_7d",
+    "onsite_conversion.total_messaging_connection",
+    "onsite_conversion.messaging_first_reply",
+    # Application / contact style conversion points.
+    "offsite_conversion.fb_pixel_submit_application",
+    "submit_application",
+    "contact",
+    "onsite_conversion.purchase",
+    "offsite_conversion.fb_pixel_purchase",
+    "purchase",
 ]
+
+_configured_lead_actions = _BENCHMARKS.get("lead_action_types")
+if isinstance(_configured_lead_actions, list) and _configured_lead_actions:
+    LEAD_ACTION_TYPES = [str(t).strip() for t in _configured_lead_actions if str(t).strip()]
+    print(f"[CONFIG] Using client-configured lead action types: {', '.join(LEAD_ACTION_TYPES)}")
+else:
+    LEAD_ACTION_TYPES = list(DEFAULT_LEAD_ACTION_TYPES)
 
 # ── Full Descriptive Playbook Names ──
 PLAYBOOK_NAMES = {
@@ -3019,11 +3065,11 @@ def _run_analysis_for_cadence(cadence_name, date_since, date_until, ds, learning
             if dt not in day_aggr:
                 day_aggr[dt] = {"spend": 0.0, "leads": 0, "clicks": 0, "impressions": 0}
             day_aggr[dt]["spend"] += float(row.get("spend", 0) or 0)
-            # leads: sum all lead-type actions
-            for act in (row.get("actions") or []):
-                if act.get("action_type") in ("lead", "onsite_conversion.lead_grouped",
-                                               "offsite_conversion.fb_pixel_lead"):
-                    day_aggr[dt]["leads"] += float(act.get("value", 0) or 0)
+            # Resolve leads exactly the way every other module does, so the daily
+            # roll-up and the campaign totals can't disagree. The previous inline
+            # list both summed overlapping aggregates (double counting) and omitted
+            # the action types LEAD_ACTION_TYPES does cover.
+            day_aggr[dt]["leads"] += get_action_value(row.get("actions"), LEAD_ACTION_TYPES)
             day_aggr[dt]["clicks"] += int(row.get("clicks", 0) or 0)
             day_aggr[dt]["impressions"] += int(row.get("impressions", 0) or 0)
 
@@ -3239,14 +3285,19 @@ def _run_analysis_for_cadence(cadence_name, date_since, date_until, ds, learning
             "non_delivering_campaigns": len([c for c in campaign_audit if c.get("delivery_status") == "NOT_DELIVERING"]),
             "intellect_insights": len(intellect_insights),
         },
-        "data_verification": {
-            "verified": True,
-            "discrepancy_pct": 0.0,
-            "verified_at": NOW.isoformat(),
-            "source": "api_daily_reconciliation",
-            "daily_rows_found": len(c_daily),
-            "verification_status": "MATCH"
-        }
+        # Deliberately no "data_verification" key here.
+        #
+        # This block used to be a hardcoded {"verified": True, "discrepancy_pct": 0.0,
+        # "verification_status": "MATCH"} — nothing was ever reconciled, it just
+        # asserted a clean bill of health on every run. Worse, meta-transform.ts
+        # computes a *real* reconciliation (API spend vs summed daily rows, reported
+        # leads vs entity-level leads) but guards it with `if (!data.data_verification)`,
+        # so this fabricated block permanently suppressed it. The dashboard's
+        # verification panel therefore had no api_spend/reported_leads to show and fell
+        # back to echoing the agent's own numbers at itself.
+        #
+        # Leaving the key absent lets the normalizer fill it in with the real figures.
+        "daily_rows_found": len(c_daily),
     }
 
     # Add layer details
@@ -3334,12 +3385,12 @@ def main():
     # 2. Run analysis for EACH cadence — filtered from the single dataset
     print("\n=== MULTI-CADENCE ANALYSIS ===\n")
 
+    # Derived from CADENCE_WINDOWS rather than restated, so the two can't drift
+    # apart again — they already had done, which is part of why a cadence's label
+    # and its actual window disagreed.
     cadence_configs = {
-        "daily":        {"since": str(YESTERDAY), "until": str(YESTERDAY)},
-        "twice_weekly": {"since": str(DATE_7D_AGO), "until": str(YESTERDAY)},
-        "weekly":       {"since": str(DATE_14D_AGO), "until": str(YESTERDAY)},
-        "biweekly":     {"since": str(DATE_30D_AGO), "until": str(YESTERDAY)},
-        "monthly":      {"since": str(MTD_START), "until": str(YESTERDAY)},
+        name: {"since": w["since"], "until": w["until"]}
+        for name, w in CADENCE_WINDOWS.items()
     }
 
     cadence_results = {}
@@ -3449,7 +3500,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Mojo Performance Agent v3 — Meta Ads (Multi-Cadence)")
     parser.add_argument("--client", default=_CLIENT_ID,
                         help="Client ID to analyze (defaults to amara)")
-    parser.add_argument("--cadence", choices=["daily", "twice_weekly", "weekly", "biweekly", "monthly"],
+    parser.add_argument("--cadence", choices=["daily", "twice_weekly", "weekly", "biweekly", "last_30_days", "monthly"],
                         default="twice_weekly",
                         help="Primary SOP cadence")
     parser.add_argument("--multi-cadence", action="store_true",
