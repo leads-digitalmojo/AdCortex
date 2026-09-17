@@ -154,7 +154,9 @@ function saveAiConfig(config: any) {
 }
 const REGISTRY_FILE = path.join(DATA_BASE, "clients_registry.json");
 const CREDENTIALS_FILE = path.join(DATA_BASE, "clients_credentials.json");
-const GOOGLE_ADS_TOKEN_CACHE = path.resolve(import.meta.dirname, "../../ads_agent/.google_ads_token_cache.json");
+// Superseded by the per-credential cache directory (ads_agent/.token_cache); kept
+// only so an existing install's shared file gets cleaned up.
+const LEGACY_GOOGLE_ADS_TOKEN_CACHE = path.resolve(import.meta.dirname, "../../ads_agent/.google_ads_token_cache.json");
 const LEGACY_GOOGLE_CREDS_FILE = path.resolve(import.meta.dirname, "../../ads_agent/google_ads_credentials.json");
 // v21 sunset on 2026-08-05 — bump this whenever Google retires the current version.
 const GOOGLE_ADS_API_VERSION = "v25";
@@ -1253,9 +1255,15 @@ export async function registerRoutes(
         syncLegacyGoogleCredentialsFile(existing.google);
       }
 
-      // Clear stale token cache so the new refresh token is used immediately.
-      if (google && fs.existsSync(GOOGLE_ADS_TOKEN_CACHE)) {
-        fs.unlinkSync(GOOGLE_ADS_TOKEN_CACHE);
+      // Cached tokens are keyed by the credentials that produced them, so new
+      // credentials simply miss the cache — no invalidation needed. Remove the old
+      // shared cache file if this install still has one lying around.
+      if (google && fs.existsSync(LEGACY_GOOGLE_ADS_TOKEN_CACHE)) {
+        try {
+          fs.unlinkSync(LEGACY_GOOGLE_ADS_TOKEN_CACHE);
+        } catch {
+          // best effort
+        }
       }
 
       res.json({ success: true, updatedAt: existing.updatedAt });

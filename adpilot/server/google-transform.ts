@@ -595,6 +595,10 @@ export function normalizeGoogleAnalysis(raw: any): any {
     conversion_sanity: raw.conversion_sanity || null,
     geo_analysis: raw.geo_analysis || null,
     demographic_breakdowns: raw.demographic_breakdowns || {},
+    // Was omitted here, so every Google page that reads `audience_analysis`
+    // (Audiences, and the per-campaign segment sub-tables on DG Audiences) saw
+    // undefined no matter what the agent collected, and rendered "no audience data".
+    audience_analysis: raw.audience_analysis || { status: "no_data", audiences: [], by_campaign: {} },
     frequency_audit: raw.frequency_audit || null,
 
     // Intelligence

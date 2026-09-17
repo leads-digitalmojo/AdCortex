@@ -7,14 +7,16 @@ Uses OAuth2 refresh token flow for authentication.
 Supports multiple clients via credentials file.
 """
 
+import hashlib
 import json
 import os
+import tempfile
 import time
 import requests
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CREDS_FILE = os.path.join(SCRIPT_DIR, "google_ads_credentials.json")
-TOKEN_CACHE_FILE = os.path.join(SCRIPT_DIR, ".google_ads_token_cache.json")
+TOKEN_CACHE_DIR = os.path.join(SCRIPT_DIR, ".token_cache")
 
 # v21 sunset on 2026-08-05 — bump this whenever Google retires the current version.
 API_VERSION = "v25"
@@ -121,16 +123,41 @@ def _load_credentials():
     return creds
 
 
+def _token_cache_path(creds):
+    """Cache file for exactly this set of OAuth credentials.
+
+    This used to be one shared file for every client. The scheduler runs several
+    clients concurrently, each in its own process with its own OAuth client and
+    refresh token, so whichever process wrote last handed its access token to all
+    the others — and a client then queried Google for its own customer id holding
+    another account's token. That fails per request, and every module here turns a
+    failed request into an empty list, so the affected client's Breakdowns,
+    Audiences, Keywords and Quality Score pages came back blank while the clients
+    that happened to win the race looked fine. Keying by credentials makes the
+    cache per-account, so a token can never cross over.
+    """
+    fingerprint = hashlib.sha256(
+        "|".join([
+            str(creds.get("client_id", "")),
+            str(creds.get("refresh_token", "")),
+            str(creds.get("login_customer_id", "")),
+        ]).encode("utf-8")
+    ).hexdigest()[:32]
+    return os.path.join(TOKEN_CACHE_DIR, f"{fingerprint}.json")
+
+
 def _get_access_token(creds):
     """Get a valid access token, using cache if not expired."""
+    cache_file = _token_cache_path(creds)
+
     # Check cache
-    if os.path.exists(TOKEN_CACHE_FILE):
+    if os.path.exists(cache_file):
         try:
-            with open(TOKEN_CACHE_FILE) as f:
+            with open(cache_file) as f:
                 cache = json.load(f)
             if cache.get("expires_at", 0) > time.time() + 60:  # 60s buffer
                 return cache["access_token"]
-        except (json.JSONDecodeError, KeyError):
+        except (json.JSONDecodeError, KeyError, OSError):
             pass
 
     # Refresh token
@@ -157,13 +184,20 @@ def _get_access_token(creds):
     access_token = data["access_token"]
     expires_in = data.get("expires_in", 3600)
 
-    # Cache it
+    # Cache it — written to a temp file and renamed so a concurrent reader never
+    # sees a half-written token, and a failed write never sinks the run.
     cache = {
         "access_token": access_token,
         "expires_at": time.time() + expires_in,
     }
-    with open(TOKEN_CACHE_FILE, "w") as f:
-        json.dump(cache, f)
+    try:
+        os.makedirs(TOKEN_CACHE_DIR, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(dir=TOKEN_CACHE_DIR, suffix=".tmp")
+        with os.fdopen(fd, "w") as f:
+            json.dump(cache, f)
+        os.replace(tmp_path, cache_file)
+    except OSError:
+        pass
 
     return access_token
 
@@ -183,7 +217,14 @@ def gaql_search(query, customer_id=None, login_customer_id=None, page_size=10000
     creds = _load_credentials()
     access_token = _get_access_token(creds)
     
-    cid = _normalize_customer_id(customer_id or creds.get("default_client_id") or "3120813693")
+    # No hardcoded default: that literal ("3120813693") is one real client's
+    # customer id, so any caller that reached here without one silently reported on
+    # that account instead — the same shared-account leak that was removed from the
+    # agent's credential resolution.
+    cid = _normalize_customer_id(customer_id or creds.get("default_client_id"))
+    if not cid:
+        return {"_error": "No Google Ads customer id resolved for this request — "
+                          "configure the client's GOOGLE_CUSTOMER_ID before syncing."}
     login_id = _normalize_customer_id(login_customer_id or creds.get("login_customer_id", ""))
 
     headers = {

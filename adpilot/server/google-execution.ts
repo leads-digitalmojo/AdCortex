@@ -17,12 +17,27 @@
 
 import fs from "fs";
 import path from "path";
+import crypto from "crypto";
 
 // ─── Configuration ────────────────────────────────────────────────
 const DATA_BASE = path.resolve(import.meta.dirname, "../../ads_agent/data");
 const AUDIT_LOG_PATH = path.join(DATA_BASE, "google_execution_audit_log.json");
 const CREDS_FILE = path.resolve(import.meta.dirname, "../../ads_agent/google_ads_credentials.json");
-const TOKEN_CACHE_FILE = path.resolve(import.meta.dirname, "../../ads_agent/.google_ads_token_cache.json");
+// One cache file per set of OAuth credentials, not one shared by every client.
+// A single shared file handed whichever client refreshed last its access token to
+// every other client — and here that token is used to *mutate* campaigns, so a
+// pause or budget change could be attempted against one client's account holding
+// another's token. Mirrors _token_cache_path() in ads_agent/google_ads_api.py.
+const TOKEN_CACHE_DIR = path.resolve(import.meta.dirname, "../../ads_agent/.token_cache");
+
+function tokenCachePath(creds: Credentials): string {
+  const fingerprint = crypto
+    .createHash("sha256")
+    .update([creds.client_id ?? "", creds.refresh_token ?? "", creds.login_customer_id ?? ""].join("|"))
+    .digest("hex")
+    .slice(0, 32);
+  return path.join(TOKEN_CACHE_DIR, `${fingerprint}.json`);
+}
 
 // v21 sunset on 2026-08-05 — bump this whenever Google retires the current version.
 const API_VERSION = "v25";
@@ -205,10 +220,12 @@ function loadCredentials(): Credentials {
  * the cached token is within 60 s of expiry (same logic as the Python impl).
  */
 async function getAccessToken(creds: Credentials): Promise<string> {
+  const cacheFile = tokenCachePath(creds);
+
   // Check cache
-  if (fs.existsSync(TOKEN_CACHE_FILE)) {
+  if (fs.existsSync(cacheFile)) {
     try {
-      const cache: TokenCache = JSON.parse(fs.readFileSync(TOKEN_CACHE_FILE, "utf-8"));
+      const cache: TokenCache = JSON.parse(fs.readFileSync(cacheFile, "utf-8"));
       const nowSec = Date.now() / 1000;
       if (cache.expires_at > nowSec + 60) {
         return cache.access_token;
@@ -246,7 +263,15 @@ async function getAccessToken(creds: Credentials): Promise<string> {
     access_token: accessToken,
     expires_at: Date.now() / 1000 + expiresIn,
   };
-  fs.writeFileSync(TOKEN_CACHE_FILE, JSON.stringify(cache, null, 2));
+  try {
+    fs.mkdirSync(TOKEN_CACHE_DIR, { recursive: true });
+    // Write-then-rename so a concurrent reader never sees a half-written token.
+    const tmp = `${cacheFile}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(cache, null, 2));
+    fs.renameSync(tmp, cacheFile);
+  } catch {
+    // Caching is an optimisation — a failed write must not fail the request.
+  }
 
   return accessToken;
 }

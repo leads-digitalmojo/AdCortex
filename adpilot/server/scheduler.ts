@@ -82,8 +82,16 @@ export interface AgentRunOptions {
 // Tracks which client/platform pairs currently have an agent process running so a
 // scoped manual sync (e.g. "sync Google for this client") can start immediately
 // instead of queuing behind an unrelated full run.
-const inFlightSyncs = new Set<string>();
+const inFlightSyncs = new Map<string, number>();
 const syncKey = (clientId: string, platform: string) => `${clientId}:${platform}`;
+
+// The agent subprocess is killed at AGENT_TIMEOUT_MS; anything still registered
+// well past that is a lock that leaked (a crash between registering and the
+// try/finally, a kill the child never acknowledged). Without this the entry stayed
+// forever and every later sync for that client answered "a sync is already running
+// for this client" until the server was restarted.
+const AGENT_TIMEOUT_MS = 600_000;
+const SYNC_LOCK_MAX_AGE_MS = AGENT_TIMEOUT_MS + 120_000;
 
 /** True while an unscoped (all-clients) run is in progress. */
 export function isFullRunActive(): boolean {
@@ -91,7 +99,15 @@ export function isFullRunActive(): boolean {
 }
 
 export function isPlatformSyncing(clientId: string, platform: string): boolean {
-  return inFlightSyncs.has(syncKey(clientId, platform));
+  const key = syncKey(clientId, platform);
+  const startedAt = inFlightSyncs.get(key);
+  if (startedAt === undefined) return false;
+  if (Date.now() - startedAt > SYNC_LOCK_MAX_AGE_MS) {
+    log(`Scheduler: clearing stale ${platform} sync lock for '${clientId}'`, "scheduler");
+    inFlightSyncs.delete(key);
+    return false;
+  }
+  return true;
 }
 
 // Number of agent runs (full or scoped) currently executing.
@@ -176,9 +192,18 @@ function saveStatus(): void {
 }
 
 function savePlatformSyncState(): void {
-  const dir = path.dirname(PLATFORM_SYNC_STATE_FILE);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(PLATFORM_SYNC_STATE_FILE, JSON.stringify(platformSyncState, null, 2));
+  // This file is a cache of state we can re-derive from the analysis files, so a
+  // failed write must not propagate. It used to: setPlatformSyncState() is called
+  // from syncClientPlatform() before its try/finally, so one EACCES/ENOSPC here
+  // escaped past the finally that releases the in-flight lock, and that client
+  // could never be synced again without restarting the server.
+  try {
+    const dir = path.dirname(PLATFORM_SYNC_STATE_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(PLATFORM_SYNC_STATE_FILE, JSON.stringify(platformSyncState, null, 2));
+  } catch (err: any) {
+    log(`Scheduler: could not persist platform sync state: ${err?.message || err}`, "scheduler");
+  }
 }
 
 export function getSchedulerStatus(): SchedulerStatus {
@@ -275,6 +300,9 @@ export function getPlatformSyncState(clientId: string, platform: string): Platfo
       last_synced_at: stored.last_synced_at || inferredFetch,
       last_successful_fetch: lastFetch,
       sync_status: status,
+      // Was dropped here, so the failure banners that read syncState.error always
+      // rendered blank even though the failed run had recorded a real message.
+      error: status === "failed" ? (stored.error ?? null) : null,
     };
   }
   return getDefaultPlatformSyncState(clientId, platform);
@@ -417,17 +445,31 @@ async function syncClientPlatform(
   Object.assign(childEnv, creds);
 
   log(`Scheduler: Running ${label} Ads Agent for client '${client.id}'...`, "scheduler");
-  inFlightSyncs.add(syncKey(client.id, platform));
-  setPlatformSyncState(client.id, platform, {
-    last_synced_at: new Date().toISOString(),
-    sync_status: "loading",
-    error: null,
-  });
+  inFlightSyncs.set(syncKey(client.id, platform), Date.now());
 
   try {
+    // Inside the try: anything that throws here must still reach the finally that
+    // releases the lock.
+    setPlatformSyncState(client.id, platform, {
+      last_synced_at: new Date().toISOString(),
+      sync_status: "loading",
+      error: null,
+    });
+
     await execFileAsync(pythonPath, [agentPath, "--client", client.id, "--multi-cadence"], {
       cwd: ADS_AGENT_DIR,
-      timeout: 600000,
+      timeout: AGENT_TIMEOUT_MS,
+      // execFile defaults to a 1MB stdout buffer and kills the child the moment it
+      // overflows. A multi-cadence run over a large account prints well past that,
+      // so the agent was being killed partway through — leaving the cadence files
+      // it had already written in place and the later modules (breakdowns,
+      // audiences, quality score) missing, which read as "this client has no data"
+      // rather than as a failure.
+      maxBuffer: 64 * 1024 * 1024,
+      // The default SIGTERM can be ignored by a child blocked in a network call, and
+      // execFile does not settle until the process actually exits — so a hung agent
+      // held its lock indefinitely.
+      killSignal: "SIGKILL",
       env: childEnv,
     });
 

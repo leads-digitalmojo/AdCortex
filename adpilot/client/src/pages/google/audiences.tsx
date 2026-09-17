@@ -328,24 +328,50 @@ export default function GoogleAudiencesPage() {
     if (!data) return [];
     const campaigns: any[] = (data as any).campaigns || [];
     return campaigns
-      .filter((c) => String(c.channel_type || "").toUpperCase() === "DEMAND_GEN")
+      // Matching only the literal channel "DEMAND_GEN" hid this page's entire
+      // contents for two real cases: accounts whose campaigns still report the
+      // legacy "DISCOVERY" channel, and campaigns the agent classified as Demand
+      // Gen from their name when the channel came back blank. Accept any of the
+      // three — campaign_type is the agent's own resolved verdict.
+      .filter((c) => {
+        const channel = String(c.channel_type || "").toUpperCase();
+        const type = String(c.campaign_type || "").toLowerCase();
+        return channel === "DEMAND_GEN" || channel === "DISCOVERY" || type.startsWith("demand_gen");
+      })
+      // The server normalizes Google campaigns before the frontend ever sees them
+      // (id -> campaign_id, cost -> spend, conversions -> leads, avg_cpc -> cpc),
+      // so reading only the raw agent names made every money column render ₹0 and
+      // left `id` undefined, which also broke the audience-segment lookup below.
       .map((c) => ({
-        id: c.id,
-        name: c.name || c.campaign_name || "Unnamed",
+        id: String(c.campaign_id ?? c.id ?? ""),
+        name: c.campaign_name || c.name || "Unnamed",
         channel_type: c.channel_type,
         campaign_type: c.campaign_type,
         status: c.status,
         impressions: c.impressions || 0,
         clicks: c.clicks || 0,
-        cost: c.cost || 0,
-        conversions: c.conversions || 0,
+        cost: c.spend ?? c.cost ?? 0,
+        conversions: c.leads ?? c.conversions ?? 0,
         ctr: c.ctr || 0,
-        avg_cpc: c.avg_cpc || 0,
+        avg_cpc: c.cpc ?? c.avg_cpc ?? 0,
         cvr: c.cvr || 0,
         cpl: c.cpl || 0,
         daily_budget: c.daily_budget,
         dg_health: c.dg_health,
-        ad_groups: c.ad_groups || [],
+        ad_groups: (c.ad_groups || []).map((ag: any) => ({
+          id: String(ag.ad_group_id ?? ag.id ?? ""),
+          name: ag.ad_group_name || ag.name || "Unnamed",
+          status: ag.status,
+          impressions: ag.impressions || 0,
+          clicks: ag.clicks || 0,
+          cost: ag.spend ?? ag.cost ?? 0,
+          conversions: ag.leads ?? ag.conversions ?? 0,
+          ctr: ag.ctr || 0,
+          avg_cpc: ag.cpc ?? ag.avg_cpc ?? 0,
+          cvr: ag.cvr || 0,
+          cpl: ag.cpl || 0,
+          health_score: ag.health_score,
+        })),
         classification: c.classification,
       }));
   }, [data]);

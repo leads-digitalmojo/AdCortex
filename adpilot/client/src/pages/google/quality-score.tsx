@@ -74,6 +74,7 @@ interface QsKeyword {
   cost: number;
   cpc: number;
   cpl: number;
+  has_quality_score: boolean;
   optimization_actions: string[];
 }
 
@@ -93,6 +94,7 @@ interface QualityScoreData {
   distribution: Array<{ score: string; count: number }>;
   summary: {
     total: number;
+    scored: number;
     avgQs: number;
     below4: number;
     below6: number;
@@ -132,8 +134,20 @@ function normalizeQualityScore(rawData: any): QualityScoreData {
     cost: safeNumber(k?.cost),
     cpc: safeNumber(k?.cpc),
     cpl: safeNumber(k?.cpl),
+    // Google issues no Quality Score for brand-new, low-traffic or non-Search
+    // keywords. Those rows are kept for their performance data (the Keywords page
+    // has no other source), so every QS statistic has to exclude them explicitly —
+    // otherwise an unscored keyword counts as a QS of 0, i.e. the worst possible.
+    has_quality_score: typeof k?.has_quality_score === "boolean"
+      ? k.has_quality_score
+      : safeNumber(k?.quality_score) > 0,
     optimization_actions: safeArray(k?.optimization_actions),
   }));
+
+  // Keywords Google has actually issued a score for. Declared before the first
+  // reader (the distribution below) — every QS statistic is computed over these,
+  // never over unscored keywords, which would otherwise count as a score of 0.
+  const scored = keywords.filter(k => k.has_quality_score);
 
   // Normalize Campaign Options
   const campaigns = rawCampaigns
@@ -148,7 +162,7 @@ function normalizeQualityScore(rawData: any): QualityScoreData {
     const score = i + 1;
     return {
       score: String(score),
-      count: keywords.filter(k => Math.round(k.quality_score) === score).length
+      count: scored.filter(k => Math.round(k.quality_score) === score).length
     };
   });
 
@@ -157,15 +171,15 @@ function normalizeQualityScore(rawData: any): QualityScoreData {
   // Prefer the backend's impression-weighted average (matches the Campaigns tab's
   // per-campaign QS, which is also impression-weighted) over a plain per-keyword
   // mean — otherwise this tab shows a different "average QS" than the rest of the app.
-  const totalImpressions = keywords.reduce((s, k) => s + k.impressions, 0);
+  const totalImpressions = scored.reduce((s, k) => s + k.impressions, 0);
   const weightedAvgQs = totalImpressions > 0
-    ? keywords.reduce((s, k) => s + k.quality_score * k.impressions, 0) / totalImpressions
-    : (total > 0 ? keywords.reduce((s, k) => s + k.quality_score, 0) / total : 0);
+    ? scored.reduce((s, k) => s + k.quality_score * k.impressions, 0) / totalImpressions
+    : (scored.length > 0 ? scored.reduce((s, k) => s + k.quality_score, 0) / scored.length : 0);
   const avgQs = typeof analysis.summary?.avg_qs === "number" ? analysis.summary.avg_qs : weightedAvgQs;
-  const below4 = keywords.filter(k => k.quality_score < 4).length;
-  const below6 = keywords.filter(k => k.quality_score < 6).length;
-  const excellentCount = keywords.filter(k => k.quality_score >= 7).length;
-  const poorCount = keywords.filter(k => k.quality_score < 5).length;
+  const below4 = scored.filter(k => k.quality_score < 4).length;
+  const below6 = scored.filter(k => k.quality_score < 6).length;
+  const excellentCount = scored.filter(k => k.quality_score >= 7).length;
+  const poorCount = scored.filter(k => k.quality_score < 5).length;
 
   // per_campaign (list form) is the primary source; fall back to by_campaign
   // (dict keyed by campaign name) for older cached analysis payloads.
@@ -190,8 +204,9 @@ function normalizeQualityScore(rawData: any): QualityScoreData {
       avgQs,
       below4,
       below6,
-      excellentPct: total > 0 ? (excellentCount / total) * 100 : 0,
-      poorPct: total > 0 ? (poorCount / total) * 100 : 0,
+      scored: scored.length,
+      excellentPct: scored.length > 0 ? (excellentCount / scored.length) * 100 : 0,
+      poorPct: scored.length > 0 ? (poorCount / scored.length) * 100 : 0,
     }
   };
 }
@@ -324,8 +339,11 @@ export default function GoogleQualityScorePage() {
             </div>
             <h3 className="t-page-title">No keyword data found</h3>
             <p className="text-base text-muted-foreground max-w-md mt-2">
-              Quality Score monitoring is active, but we couldn't find keywords for this client.
-              Ensure 'keyword_view' is enabled in your Google Ads agent configuration.
+              This account reported no keywords for the selected period. Quality Score
+              only exists for Search keywords — an account running Demand Gen, Display
+              or Performance Max campaigns alone will always be empty here. If it does
+              run Search campaigns, try a wider time window, or re-run the Google Ads
+              agent.
             </p>
           </CardContent>
         </Card>
@@ -483,11 +501,14 @@ export default function GoogleQualityScorePage() {
           const paginated = allEntries.slice((page - 1) * pageSize, page * pageSize);
 
           return paginated.map(([name, keywords]) => {
-            const agImpressions = keywords.reduce((s, k) => s + k.impressions, 0);
+            const agScored = keywords.filter(k => k.has_quality_score);
+            const agImpressions = agScored.reduce((s, k) => s + k.impressions, 0);
             const agAvg = agImpressions > 0
-              ? keywords.reduce((s, k) => s + k.quality_score * k.impressions, 0) / agImpressions
-              : keywords.reduce((s, k) => s + k.quality_score, 0) / keywords.length;
-            const agCritical = keywords.filter(k => k.quality_score < 4).length;
+              ? agScored.reduce((s, k) => s + k.quality_score * k.impressions, 0) / agImpressions
+              : (agScored.length > 0
+                  ? agScored.reduce((s, k) => s + k.quality_score, 0) / agScored.length
+                  : 0);
+            const agCritical = agScored.filter(k => k.quality_score < 4).length;
             const isOpen = openAdGroups[name] !== false;
 
             return (
@@ -535,12 +556,23 @@ export default function GoogleQualityScorePage() {
                                 <p className="text-[12px] text-slate-500 font-semibold uppercase mt-1.5 tracking-wider opacity-80">{kw.match_type}</p>
                               </td>
                               <td className="p-6">
-                                <div className="flex items-center gap-3">
-                                  <div className={cn("w-16 h-2 rounded-full shadow-inner bg-muted/40 overflow-hidden")}>
-                                    <div className={cn("h-full rounded-full transition-all duration-700", qsBgColor(kw.quality_score))} style={{ width: `${(kw.quality_score / 10) * 100}%` }} />
+                                {kw.has_quality_score ? (
+                                  <div className="flex items-center gap-3">
+                                    <div className={cn("w-16 h-2 rounded-full shadow-inner bg-muted/40 overflow-hidden")}>
+                                      <div className={cn("h-full rounded-full transition-all duration-700", qsBgColor(kw.quality_score))} style={{ width: `${(kw.quality_score / 10) * 100}%` }} />
+                                    </div>
+                                    <span className={cn("font-bold tabular-nums text-base", qsColor(kw.quality_score))}>{kw.quality_score}</span>
                                   </div>
-                                  <span className={cn("font-bold tabular-nums text-base", qsColor(kw.quality_score))}>{kw.quality_score}</span>
-                                </div>
+                                ) : (
+                                  // A keyword Google hasn't scored yet is not a zero —
+                                  // rendering it as one painted new keywords red.
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <span className="text-base font-bold text-muted-foreground">—</span>
+                                    </TooltipTrigger>
+                                    <TooltipContent>Not yet scored by Google — too new or too little traffic.</TooltipContent>
+                                  </Tooltip>
+                                )}
                               </td>
                               <td className="p-6"><FactorBadge val={kw.expected_ctr} /></td>
                               <td className="p-6"><FactorBadge val={kw.ad_relevance} /></td>

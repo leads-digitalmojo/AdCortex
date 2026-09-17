@@ -479,13 +479,17 @@ PLACEMENT_ROW_LIMIT = 300
 
 # geoTargetConstant id -> readable name. Google returns geo segments as bare resource
 # names, so without a lookup the Location breakdown would read "Location 1007740".
-# Seeded with the geos these accounts actually target; unknown ids fall back to the id.
+# Seeded with the geos these accounts commonly target so the common case needs no
+# API call; anything else is resolved on demand by _resolve_geo_label().
 GEO_LABEL_CACHE = {
     "1007740": "Hyderabad",
     "9040231": "Secunderabad",
     "2356": "India",
     "20130": "Telangana",
 }
+
+# Ids we already asked Google about and it had no name for — never ask twice.
+_GEO_LOOKUP_MISSES = set()
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━ UTILITY HELPERS ━━━━━━━━━━━━━━━━━━━━━━━
@@ -3101,8 +3105,13 @@ def analyze_quality_score(cadence_window=None):
         "ad_group_criterion.quality_info.post_click_quality_score, "
         "ad_group.name, ad_group.id, campaign.name, campaign.id "
         "FROM ad_group_criterion "
-        "WHERE campaign.status = 'ENABLED' AND ad_group.status = 'ENABLED' "
-        "AND ad_group_criterion.status = 'ENABLED' "
+        # Was ENABLED-only on all three levels. A keyword that spent during the
+        # window but sits under a since-paused campaign or ad group vanished from
+        # both the Quality Score page and the Keywords page, which has no other
+        # source — so an account that paused its search campaigns read as "no
+        # keyword data has ever been collected".
+        "WHERE campaign.status != 'REMOVED' AND ad_group.status != 'REMOVED' "
+        "AND ad_group_criterion.status != 'REMOVED' "
         "AND ad_group_criterion.type = 'KEYWORD'"
     )
 
@@ -3112,7 +3121,7 @@ def analyze_quality_score(cadence_window=None):
         "ad_group.name, ad_group.id, campaign.name, campaign.id, "
         "metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions "
         "FROM keyword_view "
-        "WHERE campaign.status = 'ENABLED' AND ad_group.status = 'ENABLED' "
+        "WHERE campaign.status != 'REMOVED' AND ad_group.status != 'REMOVED' "
         f"AND segments.date BETWEEN '{since}' AND '{until}'"
     )
 
@@ -3199,8 +3208,11 @@ def analyze_quality_score(cadence_window=None):
     if not rows:
         return {
             "status": "no_data",
-            "summary": {"avg_qs": 0, "total_keywords": 0, "excellent_8_10": 0, "good_6_7": 0, "poor_1_5": 0, "needs_attention": []},
+            "summary": {"avg_qs": 0, "total_keywords": 0, "scored_keywords": 0,
+                        "excellent_8_10": 0, "good_6_7": 0, "poor_1_5": 0, "needs_attention": []},
             "keywords": [],
+            "by_campaign": {},
+            "per_campaign": [],
         }
 
     keywords = []
@@ -3214,8 +3226,13 @@ def analyze_quality_score(cadence_window=None):
         ag = r.get("adGroup", {})
 
         qs = si(metrics.get("historicalQualityScore"))
-        if qs == 0:
-            continue
+        # Google reports no Quality Score for brand-new keywords, for keywords with
+        # too little traffic, and for every non-Search keyword. Dropping those rows
+        # emptied the Keywords page — whose only source is this list — for any
+        # account whose keywords hadn't earned a score yet. Keep the row for its
+        # performance metrics; has_quality_score marks whether the score is real,
+        # and every QS statistic below counts only scored keywords.
+        has_qs = qs > 0
 
         impressions = si(metrics.get("impressions"))
         clicks = si(metrics.get("clicks"))
@@ -3229,9 +3246,9 @@ def analyze_quality_score(cadence_window=None):
             classification = "NEW"
         elif conversions == 0 and clicks >= 20 and cost > 1.5 * CPL_TARGET:
             classification = "UNDERPERFORMER"
-        elif qs < SOP["qs_critical"]:
+        elif has_qs and qs < SOP["qs_critical"]:
             classification = "UNDERPERFORMER"
-        elif conversions > 0 and cpl <= CPL_TARGET * 1.1 and qs >= 6:
+        elif conversions > 0 and cpl <= CPL_TARGET * 1.1 and (not has_qs or qs >= 6):
             classification = "WINNER"
         else:
             classification = "WATCH"
@@ -3244,6 +3261,7 @@ def analyze_quality_score(cadence_window=None):
             "ad_group_name": ag.get("name", ""),
             "ad_group_id": ag.get("id", ""),
             "quality_score": qs,
+            "has_quality_score": has_qs,
             "expected_ctr": metrics.get("historicalSearchPredictedCtr", ""),
             "ad_relevance": metrics.get("historicalCreativeQualityScore", ""),
             "landing_page_experience": metrics.get("historicalLandingPageQualityScore", ""),
@@ -3257,9 +3275,9 @@ def analyze_quality_score(cadence_window=None):
 
         # Optimization actions
         actions = []
-        if qs < SOP["qs_critical"]:
+        if has_qs and qs < SOP["qs_critical"]:
             actions.append("CRITICAL: QS < 4 — review ad relevance, LP, and expected CTR")
-        elif qs < SOP["qs_needs_work"]:
+        elif has_qs and qs < SOP["qs_needs_work"]:
             actions.append(f"QS {qs} needs improvement — focus on weakest sub-factor")
 
         ectr = str(metrics.get("historicalSearchPredictedCtr", "")).upper()
@@ -3275,13 +3293,16 @@ def analyze_quality_score(cadence_window=None):
 
         kw_entry["optimization_actions"] = actions
         keywords.append(kw_entry)
-        qs_values.append(qs)
+        if has_qs:
+            qs_values.append(qs)
         by_campaign[camp.get("name", "")].append(kw_entry)
 
-    # Summary
-    total_impressions = sum(k["impressions"] for k in keywords)
+    # Summary — averages are over scored keywords only, so a pile of not-yet-scored
+    # keywords can't drag the account average toward zero.
+    scored = [k for k in keywords if k.get("has_quality_score")]
+    total_impressions = sum(k["impressions"] for k in scored)
     if total_impressions > 0:
-        avg_qs = sum(k["quality_score"] * k["impressions"] for k in keywords) / total_impressions
+        avg_qs = sum(k["quality_score"] * k["impressions"] for k in scored) / total_impressions
     elif qs_values:
         avg_qs = sum(qs_values) / len(qs_values)
     else:
@@ -3290,28 +3311,33 @@ def analyze_quality_score(cadence_window=None):
     good = sum(1 for q in qs_values if 6 <= q < 8)
     poor = sum(1 for q in qs_values if q < 6)
 
+    # "Low QS" means a low score Google actually issued — a keyword with no score
+    # yet is not a critical keyword, and counting it as one would have flagged
+    # every new keyword in the account the moment unscored rows started being kept.
     needs_attention = []
-    critical_kws = [k for k in keywords if k["quality_score"] < SOP["qs_critical"]]
+    critical_kws = [k for k in scored if k["quality_score"] < SOP["qs_critical"]]
     if critical_kws:
         needs_attention.append(f"{len(critical_kws)} keywords with critical QS < {SOP['qs_critical']}")
-    low_qs_high_spend = [k for k in keywords if k["quality_score"] < 6 and k["cost"] > 1000]
+    low_qs_high_spend = [k for k in scored if k["quality_score"] < 6 and k["cost"] > 1000]
     if low_qs_high_spend:
         needs_attention.append(f"{len(low_qs_high_spend)} low-QS keywords with >₹1000 spend — priority fix")
 
-    # Per-campaign QS averages (Impression Weighted)
+    # Per-campaign QS averages (Impression Weighted, scored keywords only)
     campaign_qs = {}
     for cname, kws in by_campaign.items():
-        cqs_vals = [k["quality_score"] for k in kws]
-        c_imps = sum(k["impressions"] for k in kws)
+        c_scored = [k for k in kws if k.get("has_quality_score")]
+        cqs_vals = [k["quality_score"] for k in c_scored]
+        c_imps = sum(k["impressions"] for k in c_scored)
         if c_imps > 0:
-            c_avg_qs = sum(k["quality_score"] * k["impressions"] for k in kws) / c_imps
+            c_avg_qs = sum(k["quality_score"] * k["impressions"] for k in c_scored) / c_imps
         else:
             c_avg_qs = sum(cqs_vals) / len(cqs_vals) if cqs_vals else 0
-            
+
         campaign_qs[cname] = {
             "campaign_name": cname,
             "avg_qs": round(c_avg_qs, 1),
             "keyword_count": len(kws),
+            "scored_keyword_count": len(c_scored),
             "critical_count": sum(1 for q in cqs_vals if q < SOP["qs_critical"]),
             "below_4": sum(1 for q in cqs_vals if q < 4),
             "below_6": sum(1 for q in cqs_vals if q < 6),
@@ -3322,12 +3348,16 @@ def analyze_quality_score(cadence_window=None):
         "summary": {
             "avg_qs": round(avg_qs, 1),
             "total_keywords": len(keywords),
+            # Lets the UI tell "this account has no keywords" apart from "it has
+            # keywords, none of which Google has scored yet" — two different
+            # problems that both used to render as "no keyword data found".
+            "scored_keywords": len(scored),
             "excellent_8_10": excellent,
             "good_6_7": good,
             "poor_1_5": poor,
             "needs_attention": needs_attention,
         },
-        "keywords": sorted(keywords, key=lambda k: k["quality_score"]),
+        "keywords": sorted(keywords, key=lambda k: (not k.get("has_quality_score"), k["quality_score"])),
         "by_campaign": campaign_qs,
         # List form of by_campaign for consumers that need an array (e.g. frontend QS tab)
         "per_campaign": sorted(campaign_qs.values(), key=lambda c: c["avg_qs"]),
@@ -3728,7 +3758,12 @@ def analyze_breakdowns(campaigns, cadence_window=None):
         "metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions "
         "FROM campaign "
         f"WHERE segments.date BETWEEN '{since}' AND '{until}' "
-        "AND campaign.status = 'ENABLED'"
+        # Was campaign.status = 'ENABLED'. The age, gender, location and placement
+        # queries below have no status filter, so a campaign that spent during the
+        # window but has since been paused showed up on every breakdown tab except
+        # Device — which then read as "no device segments detected" on exactly the
+        # accounts that had paused their spenders.
+        "AND campaign.status != 'REMOVED'"
     )
     raw_device = get_report("campaign", since=since, until=until, query=device_gaql)
     if isinstance(raw_device, list):
@@ -3834,6 +3869,14 @@ def analyze_breakdowns(campaigns, cadence_window=None):
     )
     raw_location = get_report("geographic_view", since=since, until=until, query=location_gaql)
     if isinstance(raw_location, list):
+        # Resolve every geo id this window touched in one batched lookup before
+        # labelling the rows, rather than one request per row.
+        geo_refs = []
+        for r in raw_location:
+            seg = r.get("segments", {})
+            geo_refs.append(seg.get("geoTargetCity") or seg.get("geo_target_city"))
+            geo_refs.append(seg.get("geoTargetRegion") or seg.get("geo_target_region"))
+        _prefetch_geo_labels(geo_refs)
         for r in raw_location:
             segments = r.get("segments", {})
             metrics = r.get("metrics", {})
@@ -3867,7 +3910,8 @@ def analyze_breakdowns(campaigns, cadence_window=None):
     print("  Fetching placement breakdown...")
     placement_gaql = (
         "SELECT campaign.name, campaign.id, "
-        "detail_placement_view.display_name, detail_placement_view.placement_type, "
+        "detail_placement_view.display_name, detail_placement_view.placement, "
+        "detail_placement_view.target_url, detail_placement_view.placement_type, "
         "metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions "
         "FROM detail_placement_view "
         f"WHERE segments.date BETWEEN '{since}' AND '{until}'"
@@ -3883,14 +3927,27 @@ def analyze_breakdowns(campaigns, cadence_window=None):
             metrics = r.get("metrics", {})
             camp = r.get("campaign", {})
             view = r.get("detailPlacementView", r.get("detail_placement_view", {}))
-            placement = view.get("displayName") or view.get("display_name") or "Unknown"
+            placement_type = view.get("placementType") or view.get("placement_type") or ""
+            # display_name is only populated for placements Google has a friendly
+            # name for (mostly YouTube channels and apps). Websites, and anything
+            # Google won't attribute, leave it empty — which collapsed every one of
+            # them into a single "Unknown" row carrying the account's whole Display
+            # spend. Fall back to the placement id/domain, then the target URL, and
+            # only then to a label that at least names the inventory type.
+            placement = (
+                view.get("displayName") or view.get("display_name")
+                or view.get("placement")
+                or view.get("targetUrl") or view.get("target_url")
+                or (f"{placement_type.replace('_', ' ').title()} (unattributed)"
+                    if placement_type else "Unattributed placement")
+            )
 
             key = (camp.get("id", ""), placement)
             entry = placement_agg.setdefault(key, {
                 "campaign_name": camp.get("name", ""),
                 "campaign_id": camp.get("id", ""),
                 "placement": placement,
-                "placement_type": view.get("placementType") or view.get("placement_type") or "",
+                "placement_type": placement_type,
                 "impressions": 0, "clicks": 0, "cost": 0.0, "conversions": 0.0,
             })
             entry["impressions"] += si(metrics.get("impressions"))
@@ -3921,12 +3978,66 @@ def analyze_breakdowns(campaigns, cadence_window=None):
     }
 
 
+def _prefetch_geo_labels(values):
+    """Resolve a batch of geoTargetConstants/<id> resource names to real names.
+
+    Previously the only source of names was a four-entry hardcoded map, so every
+    geo outside Hyderabad/Secunderabad/Telangana/India rendered as "Location
+    9198760" — which is what the Location breakdown showed for any account
+    targeting anywhere else. geo_target_constant is a queryable resource; ask
+    Google for the names once per run and cache them.
+    """
+    wanted = set()
+    for value in values:
+        text = str(value or "")
+        if "geoTargetConstants/" not in text:
+            continue
+        geo_id = text.rsplit("/", 1)[-1]
+        if geo_id and geo_id not in GEO_LABEL_CACHE and geo_id not in _GEO_LOOKUP_MISSES:
+            wanted.add(geo_id)
+
+    if not wanted:
+        return
+
+    # GAQL has a practical ceiling on IN-list size; chunk so one big account
+    # can't fail the whole lookup.
+    ids = sorted(wanted)
+    for start in range(0, len(ids), 200):
+        chunk = ids[start:start + 200]
+        resources = ", ".join(f"'geoTargetConstants/{gid}'" for gid in chunk)
+        gaql = (
+            "SELECT geo_target_constant.id, geo_target_constant.name, "
+            "geo_target_constant.canonical_name "
+            "FROM geo_target_constant "
+            f"WHERE geo_target_constant.resource_name IN ({resources})"
+        )
+        try:
+            rows = get_report("geo_target_constant", query=gaql)
+        except Exception as e:  # a failed lookup must not sink the breakdown
+            print(f"  [WARN] Geo name lookup failed: {str(e)[:120]}")
+            rows = None
+        if not isinstance(rows, list):
+            if isinstance(rows, dict) and "_error" in rows:
+                print(f"  [WARN] Geo name lookup failed: {str(rows['_error'])[:160]}")
+            _GEO_LOOKUP_MISSES.update(chunk)
+            continue
+        for r in rows:
+            gtc = r.get("geoTargetConstant", r.get("geo_target_constant", {}))
+            gid = str(gtc.get("id", ""))
+            # canonical_name is "Kukatpally,Telangana,India" — the leading segment
+            # is the place itself, which is what belongs in a one-column table.
+            canonical = gtc.get("canonicalName") or gtc.get("canonical_name") or ""
+            name = gtc.get("name") or (canonical.split(",")[0] if canonical else "")
+            if gid and name:
+                GEO_LABEL_CACHE[gid] = name
+        _GEO_LOOKUP_MISSES.update(g for g in chunk if g not in GEO_LABEL_CACHE)
+
+
 def _resolve_geo_label(value):
     """Turn a geoTargetConstants/<id> resource name into a readable location.
 
-    The geo analysis pass already builds an id -> name map for the account's target
-    locations; reuse it when we can and fall back to the bare id so a row is never
-    silently dropped.
+    Reads the cache that _prefetch_geo_labels() fills; falls back to the bare id so
+    a row is never silently dropped.
     """
     if not value:
         return ""

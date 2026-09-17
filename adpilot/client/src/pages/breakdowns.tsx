@@ -634,18 +634,10 @@ function GoogleBreakdowns({ clientId, analysisData, isLoadingAnalysis, analysisE
     );
   }
 
-  if (rows.length === 0) {
-    return (
-      <Card className="m-6 bg-muted/20 border-border/50" >
-        <CardContent className="p-12 text-center">
-          <Clock className="w-10 h-10 mx-auto text-muted-foreground mb-3" />
-          <p className="text-base text-muted-foreground">
-            No {activeTab.toLowerCase()} segments detected for the selected period.
-          </p>
-        </CardContent>
-      </Card>
-    );
-  }
+  // An empty tab used to return this card *instead of* the whole page, which took
+  // the title and the tab strip with it — leaving no way to get back to a tab that
+  // does have data without reloading. Render it inside the page instead.
+  const isEmptyTab = rows.length === 0;
 
   return (
     <div className="p-6 space-y-4 max-w-[1600px]">
@@ -670,6 +662,19 @@ function GoogleBreakdowns({ clientId, analysisData, isLoadingAnalysis, analysisE
         ))}
       </div>
 
+      {isEmptyTab ? (
+        <Card className="bg-muted/20 border-border/50">
+          <CardContent className="p-12 text-center">
+            <Clock className="w-10 h-10 mx-auto text-muted-foreground mb-3" />
+            <p className="text-base text-muted-foreground">
+              No {activeTab.toLowerCase()} segments detected for the selected period.
+            </p>
+            <p className="text-xs text-muted-foreground mt-2">
+              Try another tab, a wider time window, or "All campaigns".
+            </p>
+          </CardContent>
+        </Card>
+      ) : (
       <Card className="border-border/40 shadow-sm overflow-hidden bg-card/30">
         <div className="overflow-x-auto">
           <table className="t-table w-full">
@@ -738,6 +743,7 @@ function GoogleBreakdowns({ clientId, analysisData, isLoadingAnalysis, analysisE
           </table>
         </div>
       </Card>
+      )}
     </div>
   );
 }
