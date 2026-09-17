@@ -480,9 +480,10 @@ const activeFunnelColors: Record<string, string> = {
 
 const cadenceDisplayMap: Record<string, string> = {
   daily: "Last 1 Day",
-  twice_weekly: "Last 7 Days",
-  weekly: "Last 14 Days",
-  biweekly: "Last 30 Days",
+  twice_weekly: "Last 3 Days",
+  weekly: "Last 7 Days",
+  biweekly: "Last 14 Days",
+  last_30_days: "Last 30 Days",
   monthly: "Month to Date",
 };
 
@@ -509,9 +510,10 @@ function CustomTooltipContent({ active, payload, label }: any) {
 function getCadencePeriodLabel(cadence: string): string {
   switch (cadence) {
     case "daily": return "1d";
-    case "twice_weekly": return "7d";
-    case "weekly": return "14d";
-    case "biweekly": return "30d";
+    case "twice_weekly": return "3d";
+    case "weekly": return "7d";
+    case "biweekly": return "14d";
+    case "last_30_days": return "30d";
     case "monthly": return "MTD";
     default: return "7d";
   }
@@ -3407,9 +3409,10 @@ export default function DashboardPage() {
 
         const cadenceDefs: AuditCadenceDef[] = [
           { key: "daily", label: "Daily", windowHours: 28 },
-          { key: "twice_weekly", label: "Twice Weekly", windowHours: 72 },
-          { key: "weekly", label: "Weekly", windowHours: 120 },
-          { key: "biweekly", label: "Bi-Weekly", windowHours: 240 },
+          { key: "twice_weekly", label: "Twice Weekly", windowHours: 96 },
+          { key: "weekly", label: "Weekly", windowHours: 192 },
+          { key: "biweekly", label: "Bi-Weekly", windowHours: 360 },
+          { key: "last_30_days", label: "Last 30 Days", windowHours: 744 },
           { key: "monthly", label: "Monthly", windowHours: 744 },
         ];
 

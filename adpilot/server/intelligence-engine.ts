@@ -252,34 +252,76 @@ function buildTerminalResponse(cards: RecommendationCard[], query: IntelligenceQ
   return { diagnosis, layerAnalysis, solutions, expectedOutcome, text };
 }
 
+// Words that appear in almost every alert and almost every diagnosis, so matching on
+// them tells you nothing about whether a card belongs to an alert.
+const ALERT_MATCH_STOPWORDS = new Set([
+  "account", "health", "dragging", "down", "performance", "target", "above", "below",
+  "campaign", "campaigns", "adset", "adsets", "this", "that", "with", "from", "have",
+  "where", "which", "cost", "spend", "critical", "warning", "alert", "issue", "lagging",
+  "engagement", "efficiency", "overall",
+]);
+
+/** Map a dashboard alert's metric label onto the metric keys the detector emits. */
+const ALERT_METRIC_ALIASES: Record<string, string[]> = {
+  cpl: ["cpl"],
+  cpsv: ["cpsv"],
+  cpql: ["cpql"],
+  creative: ["creative", "creative_age", "rsa", "ctr"],
+  budget: ["budget"],
+  leads: ["leads", "cvr"],
+  frequency: ["freq"],
+  ctr: ["ctr"],
+  cpm: ["cpm"],
+  qs: ["qs"],
+  "quality score": ["qs"],
+};
+
+function alertMetricKeys(metric?: string): string[] {
+  const key = (metric || "").trim().toLowerCase();
+  if (!key) return [];
+  return ALERT_METRIC_ALIASES[key] || [key];
+}
+
 function filterCardsForAlert(cards: RecommendationCard[], alertContext?: IntelligenceQuery["alertContext"]) {
   if (!alertContext?.problem) return cards;
   const problemText = alertContext.problem.toLowerCase();
-  const metricText = alertContext.metric?.toLowerCase() || "";
+  const metricKeys = alertMetricKeys(alertContext.metric);
   const campaignText = Object.values(alertContext.metrics || {})
     .map((value) => String(value).toLowerCase())
     .join(" ");
   const tokens = problemText
     .split(/[^a-z0-9]+/i)
     .map((token) => token.trim())
-    .filter((token) => token.length >= 4);
+    .filter((token) => token.length >= 4 && !ALERT_MATCH_STOPWORDS.has(token));
+
+  // The metric is the strongest signal available and it is exact — a CPL alert wants
+  // the CPL cards. Text matching only ever ran as a fallback because cards did not
+  // used to carry their metric.
+  if (metricKeys.length > 0) {
+    const byMetric = cards.filter((card) => metricKeys.includes((card.symptomMetric || "").toLowerCase()));
+    if (byMetric.length > 0) return byMetric;
+  }
 
   const filtered = cards.filter((card) => {
     const haystack = `${card.entity.name} ${card.entity.type} ${card.diagnosis.problem} ${card.diagnosis.data.join(" ")} ${card.diagnosis.rootCauseChain.join(" ")}`
       .toLowerCase();
 
     if (haystack.includes(problemText)) return true;
-    if (metricText && haystack.includes(metricText)) return true;
     if (campaignText && (haystack.includes(campaignText) || campaignText.includes(card.entity.name.toLowerCase()))) return true;
 
-    const tokenMatches = tokens.filter((token) => haystack.includes(token));
-    if (tokenMatches.length >= 2) return true;
-    if (tokenMatches.length >= 1 && metricText && haystack.includes(metricText)) return true;
+    // Two distinct, non-generic tokens. The old threshold counted words like
+    // "account", "health" and "cost", which every card matched — so a CPL alert, a
+    // CPSV alert and a Creative alert all kept the full card list and then all
+    // rendered whichever card happened to rank first.
+    if (tokens.filter((token) => haystack.includes(token)).length >= 2) return true;
 
     return problemText.includes(card.entity.name.toLowerCase());
   });
 
-  return filtered.length > 0 ? filtered : cards;
+  // Deliberately returns an empty list when nothing matches. Falling back to every
+  // card is what made three different alerts open the same suggestion; the modal
+  // says it has no specific recommendation instead.
+  return filtered;
 }
 
 function severityWeight(severity: RecommendationCard["severity"]): number {

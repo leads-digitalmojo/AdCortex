@@ -36,6 +36,9 @@ export interface RecommendationCard {
   id: string;
   severity: SeverityTier;
   platform: "meta" | "google";
+  /** The metric that triggered this card (cpl, cpsv, creative, ...). Lets a dashboard
+   *  alert be matched to its own recommendation instead of by fuzzy text overlap. */
+  symptomMetric: string;
   entity: {
     id?: string;
     name: string;
@@ -1170,6 +1173,7 @@ export async function runSolutionPipeline(problem: DetectedProblem, ctx: Assembl
     id: problem.id,
     severity: problem.severity,
     platform: problem.platform,
+    symptomMetric: problem.symptomMetric,
     entity: {
       id: problem.entity.id,
       name: problem.entity.name,

@@ -131,14 +131,54 @@ function metricValueForEntity(entity: any, metricKey: string): number | null {
   }
 }
 
+// Account-level health breakdowns are stored as weighted points, not scores: a
+// perfect CPL is 20 (its weight), a perfect Creative is 10. Mirrors the weights in
+// scoring-config.json / getMetricWeights().
+const ACCOUNT_METRIC_WEIGHTS: Record<string, number> = {
+  cpsv: 25,
+  budget: 25,
+  cpql: 20,
+  cpl: 20,
+  creative: 10,
+};
+
+/**
+ * Normalize a breakdown entry to a real 0-100 score.
+ *
+ * Two different shapes land here. Campaign/adset `detailed_breakdown` entries carry
+ * `{score, weight}` where `score` is already 0-100. Account `account_health_breakdown`
+ * entries are bare numbers holding weighted *points* out of that metric's weight.
+ * Both used to be read as if they were 0-100, so a perfectly healthy account CPL
+ * (20 points out of 20) was reported as "CPL 20/100" — beside a campaign's genuine
+ * "CPL 100/100" in the same list. That also made every account metric fall under the
+ * `score < 60` weak threshold permanently, so the account always produced a problem
+ * on all five metrics and every alert collapsed onto the same top recommendation.
+ */
+function normalizeBreakdownScore(key: string, rawValue: any): { score: number; weight?: number } {
+  if (typeof rawValue === "number") {
+    const weight = ACCOUNT_METRIC_WEIGHTS[key];
+    if (weight && weight > 0) {
+      return { score: Math.max(0, Math.min(100, (rawValue / weight) * 100)), weight };
+    }
+    return { score: rawValue };
+  }
+
+  // A `detailed_breakdown` entry's `score` is already 0-100; its `weight` only says
+  // how much the metric contributes to the parent score, not what it is out of.
+  const rawScore = toNumber(rawValue?.score, 0);
+  const weight = toNumber(rawValue?.weight, 0);
+  return { score: Math.max(0, Math.min(100, rawScore)), weight: weight || undefined };
+}
+
 function extractMetricsFromBreakdown(entity: any, breakdown: Record<string, any> | undefined): EntityMetricScore[] {
   if (!breakdown || typeof breakdown !== "object") return [];
 
   return Object.entries(breakdown)
+    // `_comment` and similar non-metric keys must not become metrics.
+    .filter(([rawKey]) => !rawKey.startsWith("_"))
     .map(([rawKey, rawValue]) => {
       const key = normalizeMetricKey(rawKey);
-      const score = typeof rawValue === "number" ? rawValue : toNumber(rawValue?.score, 0);
-      const weight = typeof rawValue === "number" ? undefined : toNumber(rawValue?.weight, 0);
+      const { score, weight } = normalizeBreakdownScore(key, rawValue);
       return {
         key,
         label: METRIC_LABELS[key] || key.toUpperCase(),

@@ -9,11 +9,15 @@ import type { PlatformSyncState } from "@/lib/sync-state";
 // from daily arrays when the array fully covers the cadence window — otherwise
 // we trust the agent's pre-computed totals (avoids stomping weekly/biweekly
 // totals with a truncated 7-day daily array).
+// Must match CADENCE_WINDOWS in both agents — a value wider than the real window
+// makes `coversWindow` false forever, which silently keeps stale pre-computed
+// totals instead of the cadence's own numbers.
 const CADENCE_EXPECTED_DAYS: Record<string, number> = {
   daily: 1,
-  twice_weekly: 7,
-  weekly: 14,
-  biweekly: 30,
+  twice_weekly: 3,
+  weekly: 7,
+  biweekly: 14,
+  last_30_days: 30,
   monthly: 31, // upper bound; actual MTD days vary
 };
 

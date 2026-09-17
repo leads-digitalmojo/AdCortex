@@ -124,7 +124,8 @@ const cadenceOptions = [
   { label: "2×/wk", value: "twice_weekly" },
   { label: "Wkly", value: "weekly" },
   { label: "Bi-wk", value: "biweekly" },
-  { label: "Mo", value: "monthly" },
+  { label: "30D", value: "last_30_days" },
+  { label: "MTD", value: "monthly" },
 ];
 
 interface AppSidebarProps {

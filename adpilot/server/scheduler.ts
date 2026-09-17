@@ -400,6 +400,7 @@ const CADENCE_FILES = [
   { file: "analysis_daily.json", cadence: "daily" },
   { file: "analysis_weekly.json", cadence: "weekly" },
   { file: "analysis_biweekly.json", cadence: "biweekly" },
+  { file: "analysis_last_30_days.json", cadence: "last_30_days" },
   { file: "analysis_monthly.json", cadence: "monthly" },
 ];
 
