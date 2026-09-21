@@ -1,5 +1,7 @@
 import { assembleContext, type QueryType } from "./context-assembler";
 import { detectProblemsFromScores } from "./problem-detector";
+import { callClaude, isClaudeAvailable } from "./claude-provider";
+import { buildRecommendationPrompt, type AdCortexRecommendation } from "./prompt-templates";
 import { deduplicateProblems } from "./problem-deduplicator";
 import {
   cardsToRecommendations,
@@ -324,6 +326,87 @@ function filterCardsForAlert(cards: RecommendationCard[], alertContext?: Intelli
   return filtered;
 }
 
+/**
+ * Direct-AI fallback for an alert the SOP-driven pipeline produced no card for.
+ * Instead of showing an empty "no suggestion" state, ask Claude to diagnose the alert
+ * itself using the same live context the pipeline assembled. Returns [] on any failure
+ * so the caller degrades to the empty state rather than erroring the request.
+ */
+/**
+ * Pull recommendation objects out of a model reply. Tries a strict parse first; if the
+ * reply is malformed (unescaped quote, trailing text, truncation) it scans the
+ * "recommendations" array for balanced { } objects and keeps every one that parses.
+ */
+function extractRecommendations(text: string): any[] {
+  const cleaned = text.replace(/```(?:json)?/gi, "");
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
+  if (start !== -1 && end > start) {
+    try {
+      const parsed = JSON.parse(cleaned.slice(start, end + 1));
+      if (Array.isArray(parsed.recommendations)) return parsed.recommendations;
+    } catch { /* fall through to salvage */ }
+  }
+
+  const arrayAt = cleaned.search(/"recommendations"\s*:\s*\[/);
+  if (arrayAt === -1) return [];
+  const found: any[] = [];
+  let depth = 0, inString = false, escaped = false, objStart = -1;
+  for (let i = cleaned.indexOf("[", arrayAt) + 1; i < cleaned.length; i++) {
+    const ch = cleaned[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") { if (depth++ === 0) objStart = i; }
+    else if (ch === "}" && --depth === 0 && objStart !== -1) {
+      try { found.push(JSON.parse(cleaned.slice(objStart, i + 1))); } catch { /* skip bad object */ }
+      objStart = -1;
+    } else if (ch === "]" && depth === 0) break;
+  }
+  return found;
+}
+
+/**
+ * Direct-AI fallback for an alert the SOP-driven pipeline produced no card for.
+ * Instead of showing an empty "no suggestion" state, ask Claude to diagnose the alert
+ * itself using the same live context the pipeline assembled. Returns null when the AI
+ * could not produce anything, so the caller can avoid caching the failure.
+ */
+async function aiRecommendationsForAlert(
+  ctx: any,
+  alertContext: NonNullable<IntelligenceQuery["alertContext"]>,
+): Promise<AdCortexRecommendation[] | null> {
+  if (!isClaudeAvailable()) return null;
+  const { system, user } = buildRecommendationPrompt(ctx, alertContext);
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const response = await callClaude({
+        systemPrompt: system,
+        userMessage: attempt === 1
+          ? user
+          : `${user}\n\nIMPORTANT: respond with strictly valid JSON only. Escape every double quote inside string values and keep reasoning concise.`,
+        modelTier: "sonnet",
+        maxTokens: 6000,
+        temperature: attempt === 1 ? 0.3 : 0,
+      });
+      const recs = extractRecommendations(response.content)
+        .filter((rec) => rec && typeof rec.action === "string" && rec.action.trim())
+        .slice(0, 3)
+        .map((rec, index) => ({ ...rec, rank: index + 1 }));
+      if (recs.length > 0) return recs;
+      console.error(`[Intelligence] AI alert fallback attempt ${attempt}: no usable recommendations in reply`);
+    } catch (err: any) {
+      console.error(`[Intelligence] AI alert fallback attempt ${attempt} failed:`, err?.message || err);
+    }
+  }
+  return null;
+}
+
 function severityWeight(severity: RecommendationCard["severity"]): number {
   return severity === "CRITICAL" ? 3 : severity === "MEDIUM" ? 2 : 1;
 }
@@ -377,7 +460,7 @@ export async function insightsEngine(query: IntelligenceQuery): Promise<Intellig
     const platformResults = await Promise.all(
       (["meta", "google"] as const).map(async (platform) => {
         const ctx = await assembleContext(query.clientId, platform, query.type, analysisDataForPlatform(query, platform));
-        return analyzeSinglePlatform(ctx, query, platform, ctx.layer2.analysisData);
+        return { ...(await analyzeSinglePlatform(ctx, query, platform, ctx.layer2.analysisData)), ctx };
       }),
     );
 
@@ -387,7 +470,12 @@ export async function insightsEngine(query: IntelligenceQuery): Promise<Intellig
     );
     const tiers = splitBySeverity(mergedCards);
     const terminalResponse = buildTerminalResponse(mergedCards, query);
-    const recommendations = cardsToRecommendations(mergedCards, query.message);
+    let aiFallbackFailed = false;
+    let recommendations = cardsToRecommendations(mergedCards, query.message);
+    if (query.alertContext && mergedCards.length === 0) {
+      const aiRecs = await aiRecommendationsForAlert(platformResults[0].ctx, query.alertContext);
+      if (aiRecs) recommendations = aiRecs; else aiFallbackFailed = true;
+    }
 
     return {
       insights: mergedCards.map(cardToInsight),
@@ -403,6 +491,7 @@ export async function insightsEngine(query: IntelligenceQuery): Promise<Intellig
       conflicts: mergedCards.flatMap((card) => card.layerAnalysis.conflicts),
       humanResponse: terminalResponse.text,
       modelUsed: "document-driven",
+      ...(aiFallbackFailed ? { aiFallbackFailed } : {}),
       terminalResponse,
       trace: {
         layer1: mergedCards.map((card) => ({ id: card.id, action: card.layerAnalysis.l1.action })),
@@ -419,7 +508,12 @@ export async function insightsEngine(query: IntelligenceQuery): Promise<Intellig
   const filteredCards = sortCards(filterCardsForAlert(cards, query.alertContext), query);
   const tiers = splitBySeverity(filteredCards);
   const terminalResponse = buildTerminalResponse(filteredCards, query);
-  const recommendations = cardsToRecommendations(filteredCards, query.message);
+  let aiFallbackFailed = false;
+  let recommendations = cardsToRecommendations(filteredCards, query.message);
+  if (query.alertContext && filteredCards.length === 0) {
+    const aiRecs = await aiRecommendationsForAlert(ctx, query.alertContext);
+    if (aiRecs) recommendations = aiRecs; else aiFallbackFailed = true;
+  }
 
   return {
     insights: filteredCards.map(cardToInsight),
@@ -435,6 +529,7 @@ export async function insightsEngine(query: IntelligenceQuery): Promise<Intellig
     conflicts: filteredCards.flatMap((card) => card.layerAnalysis.conflicts),
     humanResponse: terminalResponse.text,
     modelUsed: "document-driven",
+    ...(aiFallbackFailed ? { aiFallbackFailed } : {}),
     terminalResponse,
     trace: {
       layer1: filteredCards.map((card) => ({ id: card.id, action: card.layerAnalysis.l1.action })),

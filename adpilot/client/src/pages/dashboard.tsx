@@ -269,7 +269,7 @@ function FixSuggestionModal({ alert, onClose, intellectInsights }: { alert: any;
             <div className="rounded-xl border border-border/40 bg-card p-5 text-center space-y-2">
               <p className="text-base font-semibold text-foreground">No fix suggestions matched this alert</p>
               <p className="text-xs text-muted-foreground leading-relaxed">
-                The dashboard request loaded, but the alert-specific filter did not find any recommendation cards for this issue.
+                No SOP rule matched this alert and the AI fallback could not generate a suggestion right now (check that the Anthropic API key is configured). Please try again.
               </p>
             </div>
           )}

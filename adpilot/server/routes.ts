@@ -4158,9 +4158,13 @@ export async function registerRoutes(
         alertContext,
       });
 
-      // Cache result (5 minute TTL)
-      setCache(cacheKey_val, result, 300); // 5 minutes
-      console.log(`[API] Cached result for ${cacheKey_val}`);
+      // Cache result (5 minute TTL) — but never a failed AI fallback, so a retry can succeed
+      if ((result as any).aiFallbackFailed) {
+        console.log(`[API] Skipping cache for ${cacheKey_val} (AI fallback failed)`);
+      } else {
+        setCache(cacheKey_val, result, 300); // 5 minutes
+        console.log(`[API] Cached result for ${cacheKey_val}`);
+      }
 
       res.json(result);
     } catch (err: any) {
